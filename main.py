@@ -1,12 +1,14 @@
 import os
 import logging
-
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-
 from github_internships import GithubInternships
 from database import SupabaseDatabase
+import threading
+from fastapi import FastAPI
+import uvicorn
+from urllib.parse import quote
 
 load_dotenv()
 
@@ -14,18 +16,30 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 handler = logging.FileHandler(filename="discord.log", encoding="utf-8", mode="w")
-
 intents = discord.Intents.default()
-
 bot = commands.Bot(command_prefix="/", intents=intents)
-
 github_internships = GithubInternships()
 supabase_db = SupabaseDatabase()
 
+app = FastAPI()
 
-import discord
-from urllib.parse import quote
+@app.get("/")
+def home():
+    return {"status": "Discord bot running"}
 
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port
+    )
 
 async def send_internship(internship):
     channel = await bot.fetch_channel(CHANNEL_ID)
@@ -123,4 +137,12 @@ async def on_ready():
         check_new_internships.start()
 
 
-bot.run(TOKEN, log_handler=handler, log_level=logging.INFO)
+if __name__ == "__main__":
+    threading.Thread(target=run_web_server).start()
+
+    bot.run(
+        TOKEN,
+        log_handler=handler,
+        log_level=logging.INFO,
+        reconnect=True
+    )
