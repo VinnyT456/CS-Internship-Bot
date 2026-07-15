@@ -14,14 +14,23 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+CATEGORY_COLORS = {
+    "Software Engineering": discord.Color.blue(),
+    "AI / ML": discord.Color.purple(),
+    "Data Science": discord.Color.green(),
+    "Quant": discord.Color.gold(),
+    "Product": discord.Color.orange(),
+    "Other": discord.Color.light_grey(),
+}
 
-handler = logging.FileHandler(filename="discord.log", encoding="utf-8", mode="w")
+handler = logging.FileHandler(filename="logs/discord.log", encoding="utf-8", mode="w")
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="/", intents=intents)
 github_internships = GithubInternships()
 supabase_db = SupabaseDatabase()
 
 app = FastAPI()
+
 
 @app.get("/")
 def home():
@@ -35,11 +44,8 @@ def health():
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port
-    )
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 async def send_internship(internship):
     channel = await bot.fetch_channel(CHANNEL_ID)
@@ -54,7 +60,7 @@ async def send_internship(internship):
         title=f"🚀 {title}",
         url=url,
         description=f"### **{company}**",
-        color=discord.Color.from_rgb(88, 101, 242),  # Discord blurple
+        color=CATEGORY_COLORS[category],
         timestamp=discord.utils.utcnow(),
     )
 
@@ -140,9 +146,4 @@ async def on_ready():
 if __name__ == "__main__":
     threading.Thread(target=run_web_server).start()
 
-    bot.run(
-        TOKEN,
-        log_handler=handler,
-        log_level=logging.INFO,
-        reconnect=True
-    )
+    bot.run(TOKEN, log_handler=handler, log_level=logging.INFO, reconnect=True)

@@ -98,17 +98,7 @@ class SupabaseDatabase:
 
             response = (
                 self.supabase.table(self.supabase_table)
-                .select(
-                    """
-                    id
-                    company_name
-                    job_title
-                    job_url
-                    job_location
-                    job_type
-                    source_repo
-                    """
-                )
+                .select("*")
                 .order("id", desc=False)
                 .execute()
             )
@@ -135,6 +125,8 @@ class SupabaseDatabase:
                 self.supabase.table(self.supabase_table)
                 .select("*")
                 .eq("sent_to_discord", False)
+                .limit(1)
+                .order("job_posted_at", desc=False)
                 .execute()
             )
 
