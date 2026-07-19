@@ -1,17 +1,20 @@
-import os
-import random
+import asyncio
 import logging
 import logging.handlers
+import os
+import random
+import threading
+from urllib.parse import quote
+
 import discord
+import uvicorn
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from github_internships import GithubInternships
-from database import SupabaseDatabase
-import threading
 from fastapi import FastAPI
-import uvicorn
-from urllib.parse import quote
-import asyncio
+
+from database import SupabaseDatabase
+from github_internships import GithubInternships
+
 
 load_dotenv()
 
@@ -19,6 +22,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID"))
 INTERNSHIPS_CHANNEL_ID = int(os.getenv("INTERNSHIPS_CHANNEL_ID"))
 NEW_GRADS_CHANNEL_ID = int(os.getenv("NEW_GRADS_CHANNEL_ID"))
+
 CATEGORY_COLORS = {
     "Software Engineering": discord.Color.blue(),
     "AI / ML": discord.Color.purple(),
@@ -28,9 +32,19 @@ CATEGORY_COLORS = {
     "Other": discord.Color.light_grey(),
 }
 
+MESSAGE_SEND_DELAY_SECONDS = 1.2
+
+CHANNEL_CACHE = {}
+SEARCH_URL_CACHE = {}
+BOT_AVATAR_URL = None
+COMMANDS_SYNCED = False
+
+
 # Append + rotate so restarts don't wipe history; mirror to console so
 # connect/disconnect events are visible in the terminal too.
-log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+log_formatter = logging.Formatter(
+    "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
 
 file_handler = logging.handlers.RotatingFileHandler(
     filename="logs/discord.log",
@@ -45,14 +59,23 @@ console_handler.setFormatter(log_formatter)
 
 discord_logger = logging.getLogger("discord")
 discord_logger.setLevel(logging.INFO)
-discord_logger.addHandler(file_handler)
-discord_logger.addHandler(console_handler)
+
+if not discord_logger.handlers:
+    discord_logger.addHandler(file_handler)
+    discord_logger.addHandler(console_handler)
+
+logger = logging.getLogger("cs_internship_bot")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+
 intents = discord.Intents.default()
 intents.members = True  # required for on_member_join
-bot = commands.Bot(command_prefix="/", intents=intents)
-github_internships = GithubInternships()
-supabase_db = SupabaseDatabase()
 
+bot = commands.Bot(command_prefix="/", intents=intents)
 app = FastAPI()
 
 
@@ -71,64 +94,140 @@ def run_web_server():
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
-async def send_internship(internship):
-    channel = await bot.fetch_channel(INTERNSHIPS_CHANNEL_ID)
+def fetch_new_internships():
+    github_internships = GithubInternships()
+    supabase_db = SupabaseDatabase()
 
-    company = internship["company_info"]["company_name"]
-    company_website = internship["company_info"]["company_website"]
-    company_linkedin = internship["company_info"]["company_linkedin"]
-    company_logo = internship["company_info"]["company_logo"]
+    github_internships.insert_internships()
+    return supabase_db.get_unsent_internships()
+
+
+def mark_internship_as_sent(internship_id):
+    supabase_db = SupabaseDatabase()
+    supabase_db.mark_as_sent(internship_id)
+
+
+def update_internship_message_id(internship_id, message_id):
+    supabase_db = SupabaseDatabase()
+    supabase_db.update_internship_message_id(internship_id, message_id)
+
+
+async def get_cached_channel(cache_key, channel_id):
+    channel = CHANNEL_CACHE.get(cache_key)
+
+    if channel is not None:
+        return channel
+
+    channel = bot.get_channel(channel_id)
+
+    if channel is None:
+        channel = await bot.fetch_channel(channel_id)
+
+    CHANNEL_CACHE[cache_key] = channel
+    return channel
+
+
+async def cache_channels():
+    await get_cached_channel("welcome", WELCOME_CHANNEL_ID)
+    await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+    await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
+
+
+def normalize_company_info(company_info):
+    if isinstance(company_info, list):
+        return company_info[0] if company_info else {}
+
+    if isinstance(company_info, dict):
+        return company_info
+
+    return {}
+
+
+def get_fallback_search_urls(company):
+    if company not in SEARCH_URL_CACHE:
+        SEARCH_URL_CACHE[company] = {
+            "website": (
+                "https://www.google.com/search?q="
+                f"{quote(company + ' careers')}"
+            ),
+            "linkedin": (
+                "https://www.linkedin.com/search/results/companies/?keywords="
+                f"{quote(company)}"
+            ),
+        }
+
+    return SEARCH_URL_CACHE[company]
+
+
+def truncate_embed_value(value, max_length=1024):
+    value = str(value or "Unknown")
+
+    if len(value) <= max_length:
+        return value
+
+    return value[: max_length - 1] + "…"
+
+
+def format_location(location):
+    location = location or "Unknown"
+    location_list = [loc.strip() for loc in location.split(" | ") if loc.strip()]
+
+    if not location_list:
+        return "Unknown"
+
+    if len(location_list) > 5:
+        location_formatted = "\n".join(f"• {loc}" for loc in location_list[:5])
+        location_formatted += f"\n• +{len(location_list) - 5} more"
+    else:
+        location_formatted = "\n".join(f"• {loc}" for loc in location_list)
+
+    return truncate_embed_value(location_formatted)
+
+
+async def send_internship(internship):
+    channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+
+    company_info = normalize_company_info(internship.get("company_info"))
+
+    company = company_info.get("company_name") or internship.get("company_name") or "Unknown"
+    company_website = company_info.get("company_website")
+    company_linkedin = company_info.get("company_linkedin")
+    company_logo = company_info.get("company_logo")
 
     internship_id = internship["id"]
-    title = internship["job_title"]
-    location = internship["job_location"]
-    category = internship["job_type"]
-    url = internship["job_url"]
-    posted = internship["job_posted_at"]
+    title = internship.get("job_title") or "Untitled Internship"
+    location = internship.get("job_location") or "Unknown"
+    category = internship.get("job_type") or "Other"
+    url = internship.get("job_url")
+    posted = internship.get("job_posted_at") or "Unknown"
 
     embed = discord.Embed(
         title=f"🚀 {title}",
         url=url,
-        color=CATEGORY_COLORS[category],
+        color=CATEGORY_COLORS.get(category, discord.Color.blurple()),
         timestamp=discord.utils.utcnow(),
     )
 
     embed.set_author(
         name=company,
-        icon_url=company_logo if company_logo else bot.user.display_avatar.url,
+        icon_url=company_logo or BOT_AVATAR_URL,
     )
 
     embed.description = f"## {company}"
 
-
-    # ----------------------------
-    # Internship Details
-    # ----------------------------
-
     embed.add_field(
         name="💻 Category",
-        value=f"```{category}```",
+        value=f"```{truncate_embed_value(category, 1018)}```",
         inline=True,
     )
-
-    location_list = location.split(" | ")
-    if len(location_list) > 5:
-        location_formatted = "\n".join(
-            f"• {loc}" for loc in location_list[:5]
-        )
-        location_formatted += f"\n• +{len(location_list)-5} more"
-    else:
-        location_formatted = "\n".join(
-            f"• {loc}" for loc in location_list
-        )
 
     embed.add_field(
         name="📍 Location",
-        value=f"```{location_formatted}```",
+        value=f"```{format_location(location)}```",
         inline=True,
     )
 
-    # Force next row
+    # Force next row. Discord displays inline fields in rows of three.
     embed.add_field(
         name="\u200b",
         value="\u200b",
@@ -137,7 +236,7 @@ async def send_internship(internship):
 
     embed.add_field(
         name="🗓️ Posted",
-        value=f"```{posted}```",
+        value=f"```{truncate_embed_value(posted, 1018)}```",
         inline=True,
     )
 
@@ -147,37 +246,32 @@ async def send_internship(internship):
         inline=True,
     )
 
-    # Force next section
+    # Force next section.
     embed.add_field(
         name="\u200b",
         value="\u200b",
         inline=True,
     )
 
-    embed.add_field(
-        name="🟢 Apply",
-        value=f"**[Open Internship ↗]({url})**",
-        inline=False,
-    )
+    if url:
+        embed.add_field(
+            name="🟢 Apply",
+            value=f"**[Open Internship ↗]({url})**",
+            inline=False,
+        )
+
+    source_repo = internship.get("source_repo") or "vanshb03/Summer2027-Internships"
+    source_url = f"https://github.com/{source_repo}"
 
     embed.add_field(
         name="📂 Source",
-        value="[Summer2027-Internships](https://github.com/vanshb03/Summer2027-Internships)",
+        value=f"[{source_repo}]({source_url})",
         inline=True,
     )
 
-    # Use stored company links, otherwise fall back to search
-    website = (
-        company_website
-        if company_website
-        else f"https://www.google.com/search?q={quote(company + ' careers')}"
-    )
-
-    linkedin = (
-        company_linkedin
-        if company_linkedin
-        else f"https://www.linkedin.com/search/results/companies/?keywords={quote(company)}"
-    )
+    fallback_urls = get_fallback_search_urls(company)
+    website = company_website or fallback_urls["website"]
+    linkedin = company_linkedin or fallback_urls["linkedin"]
 
     embed.add_field(
         name="🔍 Research",
@@ -193,31 +287,51 @@ async def send_internship(internship):
 
     embed.set_footer(
         text="CS Internship Bot • Auto-updated every 15 minutes",
-        icon_url=bot.user.display_avatar.url,
+        icon_url=BOT_AVATAR_URL,
     )
 
     message = await channel.send(embed=embed)
-    supabase_db.update_internship_message_id(internship_id, message.id)
+
+    await asyncio.to_thread(
+        update_internship_message_id,
+        internship_id,
+        message.id,
+    )
+
 
 @tasks.loop(minutes=15)
 async def check_new_internships():
-    await asyncio.to_thread(github_internships.insert_internships)
+    try:
+        internships = await asyncio.to_thread(fetch_new_internships)
+    except Exception:
+        logger.exception("Failed fetching internships")
+        return
 
-    internships = await asyncio.to_thread(
-        supabase_db.get_unsent_internships
-    )
+    logger.info("Found %s unsent internships", len(internships))
 
     for internship in internships:
+        internship_id = internship.get("id", "unknown")
+
         try:
             await send_internship(internship)
 
             await asyncio.to_thread(
-                supabase_db.mark_as_sent,
+                mark_internship_as_sent,
                 internship["id"],
             )
 
+            await asyncio.sleep(MESSAGE_SEND_DELAY_SECONDS)
+
+        except discord.HTTPException as exc:
+            logger.exception(
+                "Discord API error while sending internship %s: %s",
+                internship_id,
+                exc,
+            )
+            await asyncio.sleep(10)
+
         except Exception:
-            logging.exception("Failed sending internship")
+            logger.exception("Failed sending internship %s", internship_id)
 
 
 @check_new_internships.before_loop
@@ -335,7 +449,7 @@ def build_welcome_embed(member, lang, greeting_idx):
 
     embed.set_author(
         name=loc["author"],
-        icon_url=bot.user.display_avatar.url,
+        icon_url=BOT_AVATAR_URL,
     )
 
     embed.set_thumbnail(url=member.display_avatar.url)
@@ -354,28 +468,32 @@ def build_welcome_embed(member, lang, greeting_idx):
 
     embed.set_footer(
         text=loc["footer"],
-        icon_url=bot.user.display_avatar.url,
+        icon_url=BOT_AVATAR_URL,
     )
 
     return embed
 
 
 async def send_welcome(member):
-    channel = await bot.fetch_channel(WELCOME_CHANNEL_ID)
+    channel = await get_cached_channel("welcome", WELCOME_CHANNEL_ID)
 
     greeting_idx = random.randrange(len(WELCOME_L10N["zh"]["greetings"]))
     embed = build_welcome_embed(member, "zh", greeting_idx)
 
     message = await channel.send(embed=embed)
 
-    # Silver Wolf's reaction to a new spawn
+    # Silver Wolf's reaction to a new spawn.
     for emoji in ("👾", "🎮", "💜"):
         await message.add_reaction(emoji)
+        await asyncio.sleep(0.35)
 
 
 @bot.event
 async def on_member_join(member):
-    await send_welcome(member)
+    try:
+        await send_welcome(member)
+    except Exception:
+        logger.exception("Failed sending welcome message for member %s", member.id)
 
 
 @bot.tree.command(
@@ -385,21 +503,52 @@ async def on_member_join(member):
 @discord.app_commands.default_permissions(administrator=True)
 async def testwelcome(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    await send_welcome(interaction.user)
+
+    try:
+        await send_welcome(interaction.user)
+    except Exception:
+        logger.exception("Failed sending test welcome message")
+        await interaction.followup.send("Failed to send welcome message.")
+        return
+
     await interaction.followup.send("Welcome message fired. Check the channel.")
 
 
 @bot.event
 async def on_ready():
-    # Guild sync is instant; global sync can take up to an hour to propagate
-    for guild in bot.guilds:
-        bot.tree.copy_global_to(guild=guild)
-        await bot.tree.sync(guild=guild)
-    await bot.tree.sync()
+    global BOT_AVATAR_URL
+    global COMMANDS_SYNCED
+
+    BOT_AVATAR_URL = bot.user.display_avatar.url
+
+    try:
+        await cache_channels()
+    except Exception:
+        logger.exception("Failed caching Discord channels")
+
+    # Sync commands once per process. Re-syncing on every reconnect can trigger
+    # Discord rate limits quickly.
+    if not COMMANDS_SYNCED:
+        try:
+            for guild in bot.guilds:
+                bot.tree.copy_global_to(guild=guild)
+                await bot.tree.sync(guild=guild)
+
+            await bot.tree.sync()
+            COMMANDS_SYNCED = True
+        except Exception:
+            logger.exception("Failed syncing slash commands")
+
     if not check_new_internships.is_running():
         check_new_internships.start()
 
+    logger.info("Bot ready as %s", bot.user)
+
 
 if __name__ == "__main__":
-    threading.Thread(target=run_web_server).start()
+    threading.Thread(
+        target=run_web_server,
+        daemon=True,
+    ).start()
+
     bot.run(TOKEN, log_handler=None, reconnect=True)
