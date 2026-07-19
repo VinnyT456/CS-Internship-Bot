@@ -12,3 +12,4 @@ supabase
 emoji
 fastapi
 uvicorn
+ddgs

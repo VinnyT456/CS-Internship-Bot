@@ -11,6 +11,136 @@ import logging
 import markdown
 from database import SupabaseDatabase
 from datetime import datetime
+import time
+from functools import lru_cache
+from urllib.parse import urlparse
+from ddgs import DDGS
+from ddgs.exceptions import DDGSException
+
+
+class CompanySearch:
+    BAD_DOMAINS = {
+        "wikipedia.org",
+        "en.wikipedia.org",
+        "m.wikipedia.org",
+        "crunchbase.com",
+        "startupranking.com",
+        "freshershunt.in",
+        "facebook.com",
+        "twitter.com",
+        "x.com",
+    }
+
+    def __init__(self):
+        self.ddgs = DDGS()
+
+        self.logger = logging.getLogger("github_internships")
+        self.logger.setLevel(logging.DEBUG)
+
+        if not self.logger.handlers:
+            handler = logging.FileHandler(
+                "logs/github_internships.log",
+                mode="a",
+                encoding="utf-8",
+            )
+            handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s - %(levelname)s - %(message)s"
+                )
+            )
+            self.logger.addHandler(handler)
+
+    def _search(self, query, max_results=5, retries=3):
+        for attempt in range(retries):
+            try:
+                return list(self.ddgs.text(query, max_results=max_results))
+
+            except DDGSException as e:
+                self.logger.warning(
+                    f"Search failed ({attempt + 1}/{retries}) for '{query}': {e}"
+                )
+
+                if attempt == retries - 1:
+                    self.logger.error(
+                        f"Giving up searching for '{query}'."
+                    )
+                    return []
+
+                time.sleep(1)
+
+        return []
+
+    def _find_best_website(self, company_name):
+        query = (
+            f'"{company_name}" official website '
+            "-site:wikipedia.org "
+            "-site:crunchbase.com"
+        )
+
+        results = self._search(query)
+
+        if not results:
+            return None
+
+        for result in results:
+            url = result.get("href")
+
+            if not url:
+                continue
+
+            domain = urlparse(url).netloc.lower().removeprefix("www.")
+
+            if any(bad in domain for bad in self.BAD_DOMAINS):
+                continue
+
+            return url
+
+        return None
+
+    def _find_linkedin(self, company_name):
+        query = f'site:linkedin.com/company "{company_name}"'
+
+        results = self._search(query)
+
+        if not results:
+            return None
+
+        for result in results:
+            url = result.get("href")
+
+            if url and "linkedin.com/company/" in url:
+                return url
+
+        return None
+
+    @staticmethod
+    def _get_domain(url):
+        if not url:
+            return None
+
+        return urlparse(url).netloc.lower().removeprefix("www.")
+
+    @staticmethod
+    def _get_logo(domain):
+        if not domain:
+            return None
+
+        return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+
+    @lru_cache(maxsize=2048)
+    def get_company_info(self, company_name):
+        website = self._find_best_website(company_name)
+        domain = self._get_domain(website)
+        linkedin = self._find_linkedin(company_name)
+        logo = self._get_logo(domain)
+
+        return {
+            "company_name": company_name,
+            "company_website": website,
+            "company_domain": domain,
+            "company_linkedin": linkedin,
+            "company_logo": logo,
+        }
 
 
 class GithubInternships:
@@ -30,52 +160,60 @@ class GithubInternships:
 
         self.markdown = MarkdownIt()
         self.supabase_db = SupabaseDatabase()
+        self.company_search = CompanySearch()
 
-        self.repos = ["vanshb03/Summer2027-Internships"]
+        self.repos = [
+            "vanshb03/Summer2027-Internships",
+        ]
 
         self.df = pd.DataFrame()
         self.urls = np.array([])
 
         self.logger.info("Github internships scraper initialized")
 
-    def get_internships(self):
-        internships = []
-        for repo_name in self.repos:
-            try:
-                self.logger.info("Generating internships from repo: %s", repo_name)
+    def get_internships(self, repo_name):
+        try:
+            self.logger.info("Generating internships from repo: %s", repo_name)
 
-                repo = self.get_repo(repo_name)
-                readme = self.get_readme(repo)
+            repo = self.get_repo(repo_name)
+            readme = self.get_readme(repo)
 
-                self.logger.info("README retrieved successfully")
+            self.logger.info("README retrieved successfully")
 
-                html = self.convert_to_html(readme)
-                soup = self.parse_html(html)
-                df = self.generate_db(soup)
-                urls = self.get_urls(soup, count=len(df))
-                df = self.clean_df(df, urls)
+            html = self.convert_to_html(readme)
+            soup = self.parse_html(html)
+            df = self.generate_db(soup)
+            urls = self.get_urls(soup, count=len(df))
+            df = self.clean_df(df, urls)
 
-                self.logger.info("Found %d application URLs", len(urls))
+            self.logger.info("Found %d application URLs", len(urls))
+            self.logger.info("Extracted %d internship rows", len(df))
 
-                self.logger.info("Extracted %d internship rows", len(df))
+            if repo_name == "vanshb03/Summer2027-Internships":
+                issues = self.get_issues(repo)
+                internships = self.parse_issue(issues)
+                self.logger.info("Parsed %d internships from issues", len(internships))
+                df = pd.concat([df, pd.DataFrame(internships)], ignore_index=True)
 
-                if repo_name == "vanshb03/Summer2027-Internships":
-                    issues = self.get_issues(repo)
-                    internships = self.parse_issue(issues)
-                    self.logger.info(
-                        "Parsed %d internships from issues", len(internships)
-                    )
-                    df = pd.concat([df, pd.DataFrame(internships)], ignore_index=True)
+            company_info = {
+                company: self.company_search.get_company_info(company)
+                for company in df["company_name"].unique()
+            }
 
-                self.supabase_db.insert_internships(df.to_dict(orient="records"))
-            except Exception:
-                self.logger.exception("Failed to generate internships")
-                raise
+            companies = list(company_info.values())
+            internships = df.to_dict(orient="records")
+
+            return internships, companies
+
+        except Exception:
+            self.logger.exception("Failed to generate internships")
+            raise
 
     def generate_db(self, soup):
         try:
             dfs = pd.read_html(StringIO(str(soup)))
             df = pd.concat(dfs, ignore_index=True)
+
             df["Date Posted"] = df["Date Posted"].apply(self.normalize_date)
             cutoff = datetime(2026, 6, 1)
             self.logger.info("Filtering internships posted after %s", cutoff)
@@ -159,7 +297,9 @@ class GithubInternships:
         return internships
 
     def get_urls(self, soup, count):
-        return np.array([link.get("href") for link in soup.select("td a[href]")])[:count]
+        return np.array([link.get("href") for link in soup.select("td a[href]")])[
+            :count
+        ]
 
     def clean_df(self, df, urls):
         self.logger.info("Cleaning dataframe")
@@ -271,7 +411,27 @@ class GithubInternships:
         current_year = datetime.now().year
         return datetime.strptime(f"{date_str} {current_year}", "%b %d %Y")
 
+    def insert_internships(self):
+        for repo_name in self.repos:
+            full_repo_name = f"https://github.com/{repo_name}"
+            current_commit_time = self.get_repo(repo_name).pushed_at.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            last_commit_time = self.supabase_db.get_repo_update_time(full_repo_name)
+
+            if last_commit_time is None or current_commit_time > last_commit_time:
+                self.logger.info("New commits found in repo %s", repo_name)
+                internships, companies = self.get_internships(repo_name)
+
+                self.supabase_db.insert_companies(companies)
+                self.supabase_db.insert_repo_update_time(
+                    full_repo_name, current_commit_time
+                )
+                self.supabase_db.insert_internships(internships)
+            else:
+                self.logger.info("No new commits found in repo %s", repo_name)
+
 
 if __name__ == "__main__":
     github_internships = GithubInternships()
-    github_internships.get_internships()
+    github_internships.insert_internships()
