@@ -260,12 +260,11 @@ async def send_internship(internship):
             inline=False,
         )
 
-    source_repo = internship.get("source_repo") or "vanshb03/Summer2027-Internships"
-    source_url = f"https://github.com/{source_repo}"
+    source_url = internship.get("source_repo")
 
     embed.add_field(
         name="📂 Source",
-        value=f"[{source_repo}]({source_url})",
+        value=f"[Source Repository]({source_url})",
         inline=True,
     )
 

@@ -16,96 +16,294 @@ from functools import lru_cache
 from urllib.parse import urlparse
 from ddgs import DDGS
 from ddgs.exceptions import DDGSException
+import re
+from difflib import SequenceMatcher
 
 
 class CompanySearch:
     BAD_DOMAINS = {
         "wikipedia.org",
-        "en.wikipedia.org",
-        "m.wikipedia.org",
-        "crunchbase.com",
-        "startupranking.com",
-        "freshershunt.in",
+        "reddit.com",
         "facebook.com",
+        "linkedin.com",
         "twitter.com",
         "x.com",
+        "youtube.com",
+        "glassdoor.com",
+        "indeed.com",
+        "crunchbase.com",
+        "pitchbook.com",
+        "bloomberg.com",
+        "instagram.com",
+        "tiktok.com",
+        "github.com",
+        "medium.com",
+        "news.ycombinator.com",
+        "freshershunt.in",
+        "startupranking.com",
+        # Job boards / ATS hosts — never the company's own site
+        "greenhouse.io",
+        "lever.co",
+        "myworkdayjobs.com",
+        "workday.com",
+        "smartrecruiters.com",
+        "ashbyhq.com",
+        "jobvite.com",
+        "bamboohr.com",
+        "icims.com",
+        "wellfound.com",
+        "angel.co",
+        "builtin.com",
+        "builtinnyc.com",
+        "levels.fyi",
+        "simplify.jobs",
+        "jobright.ai",
+        "ripplematch.com",
+        "untapped.io",
+        "ziprecruiter.com",
+        "monster.com",
+        "dice.com",
+        "handshake.com",
+        "joinhandshake.com",
+        # Company-data aggregators
+        "zoominfo.com",
+        "apollo.io",
+        "rocketreach.co",
+        "signalhire.com",
+        "theorg.com",
+        "owler.com",
+        "craft.co",
+        "cbinsights.com",
+        "zippia.com",
+        "pitchgrade.com",
     }
+
+    # Legal/branding suffixes that appear in listings but rarely in domains
+    COMPANY_SUFFIXES = (
+        "incorporated",
+        "technologies",
+        "technology",
+        "corporation",
+        "holdings",
+        "limited",
+        "company",
+        "group",
+        "corp",
+        "labs",
+        "tech",
+        "inc",
+        "llc",
+        "ltd",
+        "co",
+        "ai",
+        "io",
+    )
+
+    # Best domain must clear this or we return None instead of junk
+    MIN_WEBSITE_SCORE = 30
 
     def __init__(self):
         self.ddgs = DDGS()
 
         self.logger = logging.getLogger("github_internships")
-        self.logger.setLevel(logging.DEBUG)
 
-        if not self.logger.handlers:
-            handler = logging.FileHandler(
-                "logs/github_internships.log",
-                mode="a",
-                encoding="utf-8",
-            )
-            handler.setFormatter(
-                logging.Formatter(
-                    "%(asctime)s - %(levelname)s - %(message)s"
-                )
-            )
-            self.logger.addHandler(handler)
-
-    def _search(self, query, max_results=5, retries=3):
+    def _search(self, query, max_results=8, retries=3):
         for attempt in range(retries):
             try:
-                return list(self.ddgs.text(query, max_results=max_results))
-
-            except DDGSException as e:
-                self.logger.warning(
-                    f"Search failed ({attempt + 1}/{retries}) for '{query}': {e}"
+                return list(
+                    self.ddgs.text(
+                        query,
+                        max_results=max_results,
+                    )
                 )
 
+            except DDGSException as e:
+                self.logger.warning(e)
+
                 if attempt == retries - 1:
-                    self.logger.error(
-                        f"Giving up searching for '{query}'."
-                    )
                     return []
 
                 time.sleep(1)
 
         return []
 
-    def _find_best_website(self, company_name):
-        query = (
-            f'"{company_name}" official website '
-            "-site:wikipedia.org "
-            "-site:crunchbase.com"
+    def _clean(self, text):
+        return re.sub(r"[^a-z0-9]", "", text.lower())
+
+    def _normalize_company(self, company):
+        """Company name reduced to its distinctive core: lowercased,
+        punctuation stripped, leading 'the' and trailing legal suffixes
+        removed ('J.P. Morgan & Co.' -> 'jpmorgan')."""
+        cleaned = self._clean(company)
+
+        if cleaned.startswith("the") and len(cleaned) > 6:
+            cleaned = cleaned[3:]
+
+        for suffix in self.COMPANY_SUFFIXES:
+            if cleaned.endswith(suffix) and len(cleaned) - len(suffix) >= 3:
+                cleaned = cleaned[: -len(suffix)]
+                break
+
+        return cleaned
+
+    @staticmethod
+    def _domain_root(domain):
+        """'careers.stripe.com' -> 'stripe', 'stripe.co.uk' -> 'stripe'."""
+        parts = domain.split(".")
+        if len(parts) >= 3 and parts[-2] in ("co", "com", "org", "ac", "gov"):
+            return parts[-3]
+        if len(parts) >= 2:
+            return parts[-2]
+        return parts[0]
+
+    def _score_result(self, company, url, title):
+        score = 0
+
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower().replace("www.", "")
+
+        # Ignore junk websites
+        if any(bad in domain for bad in self.BAD_DOMAINS):
+            return -100
+
+        company_core = self._normalize_company(company)
+        domain_clean = self._clean(domain)
+        domain_root = self._clean(self._domain_root(domain))
+        title_clean = self._clean(title or "")
+
+        # Exact domain match is the strongest possible signal
+        if domain_root == company_core:
+            score += 100
+        elif domain_root.startswith(company_core) or company_core.startswith(domain_root):
+            score += 55
+        elif company_core in domain_clean:
+            score += 45
+        else:
+            # Fuzzy match catches abbreviations and mergers
+            # ('jpmorgan' vs 'jpmorganchase')
+            similarity = SequenceMatcher(None, company_core, domain_root).ratio()
+            if similarity >= 0.8:
+                score += 50
+            elif similarity >= 0.65:
+                score += 25
+
+        # Title contains company name
+        if company_core and company_core in title_clean:
+            score += 20
+
+        # Prefer shallow URLs: homepage beats deep blog/press links
+        path_depth = len([seg for seg in parsed.path.split("/") if seg])
+        score -= path_depth * 8
+
+        # Official wording
+        if "official" in (title or "").lower():
+            score += 10
+
+        # Careers/about pages are still on the company's own site
+        if any(seg in parsed.path.lower() for seg in ("/careers", "/jobs", "/about")):
+            score += 12
+
+        # Penalize obvious junk
+        bad_words = [
+            "reddit",
+            "glassdoor",
+            "salary",
+            "review",
+            "wiki",
+            "news",
+            "linkedin",
+        ]
+
+        if any(word in (title or "").lower() for word in bad_words):
+            score -= 50
+
+        return score
+
+    def _find_best_website(self, company):
+
+        queries = [
+            f'"{company}" official website',
+            f'"{company}"',
+            f'"{company}" careers',
+        ]
+
+        # Aggregate per domain: a domain surfacing across multiple queries
+        # is much more likely the real site than a one-off high scorer.
+        domain_scores = {}
+        domain_best = {}  # domain -> (score, path_depth, url)
+        seen_urls = set()
+
+        for query in queries:
+
+            results = self._search(query)
+
+            for result in results:
+
+                url = result.get("href")
+
+                if not url or url in seen_urls:
+                    continue
+
+                seen_urls.add(url)
+
+                score = self._score_result(
+                    company,
+                    url,
+                    result.get("title", ""),
+                )
+
+                if score <= -100:
+                    continue
+
+                parsed = urlparse(url)
+                domain = parsed.netloc.lower().replace("www.", "")
+                path_depth = len([seg for seg in parsed.path.split("/") if seg])
+
+                domain_scores[domain] = domain_scores.get(domain, 0) + score + 5
+
+                best = domain_best.get(domain)
+                if best is None or (score, -path_depth) > (best[0], -best[1]):
+                    domain_best[domain] = (score, path_depth, url)
+
+        if not domain_scores:
+            return None
+
+        best_domain = max(domain_scores, key=domain_scores.get)
+
+        if domain_scores[best_domain] < self.MIN_WEBSITE_SCORE:
+            self.logger.info(
+                "No confident website for %s (best: %s, score %d)",
+                company,
+                best_domain,
+                domain_scores[best_domain],
+            )
+            return None
+
+        best_score, best_depth, best_url = domain_best[best_domain]
+
+        # If the winner is a deep link on a domain that clearly matches the
+        # company, canonicalize to the homepage.
+        domain_root = self._clean(self._domain_root(best_domain))
+        company_core = self._normalize_company(company)
+        strong_match = (
+            domain_root == company_core
+            or SequenceMatcher(None, company_core, domain_root).ratio() >= 0.8
         )
 
-        results = self._search(query)
+        if best_depth > 1 and strong_match:
+            scheme = urlparse(best_url).scheme or "https"
+            return f"{scheme}://{urlparse(best_url).netloc}/"
 
-        if not results:
-            return None
+        return best_url
 
-        for result in results:
-            url = result.get("href")
+    def _find_linkedin(self, company):
 
-            if not url:
-                continue
-
-            domain = urlparse(url).netloc.lower().removeprefix("www.")
-
-            if any(bad in domain for bad in self.BAD_DOMAINS):
-                continue
-
-            return url
-
-        return None
-
-    def _find_linkedin(self, company_name):
-        query = f'site:linkedin.com/company "{company_name}"'
-
-        results = self._search(query)
-
-        if not results:
-            return None
+        results = self._search(
+            f'site:linkedin.com/company "{company}"'
+        )
 
         for result in results:
+
             url = result.get("href")
 
             if url and "linkedin.com/company/" in url:
@@ -115,31 +313,33 @@ class CompanySearch:
 
     @staticmethod
     def _get_domain(url):
+
         if not url:
             return None
 
-        return urlparse(url).netloc.lower().removeprefix("www.")
+        return urlparse(url).netloc.replace("www.", "")
 
     @staticmethod
     def _get_logo(domain):
+
         if not domain:
             return None
 
         return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
 
     @lru_cache(maxsize=2048)
-    def get_company_info(self, company_name):
-        website = self._find_best_website(company_name)
+    def get_company_info(self, company):
+
+        website = self._find_best_website(company)
+
         domain = self._get_domain(website)
-        linkedin = self._find_linkedin(company_name)
-        logo = self._get_logo(domain)
 
         return {
-            "company_name": company_name,
+            "company_name": company,
             "company_website": website,
             "company_domain": domain,
-            "company_linkedin": linkedin,
-            "company_logo": logo,
+            "company_linkedin": self._find_linkedin(company),
+            "company_logo": self._get_logo(domain),
         }
 
 
@@ -195,9 +395,26 @@ class GithubInternships:
                 self.logger.info("Parsed %d internships from issues", len(internships))
                 df = pd.concat([df, pd.DataFrame(internships)], ignore_index=True)
 
+            # Only run web searches for companies not already stored —
+            # the DB row is the source of truth for known companies.
+            existing_names = set(self.supabase_db.get_existing_company_names())
+
+            new_names = [
+                company
+                for company in df["company_name"].unique()
+                if company not in existing_names
+            ]
+
+            self.logger.info(
+                "Company lookup: %d unique, %d already known, %d to search",
+                df["company_name"].nunique(),
+                df["company_name"].nunique() - len(new_names),
+                len(new_names),
+            )
+
             company_info = {
                 company: self.company_search.get_company_info(company)
-                for company in df["company_name"].unique()
+                for company in new_names
             }
 
             companies = list(company_info.values())

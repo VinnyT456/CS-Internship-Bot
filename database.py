@@ -74,10 +74,20 @@ class SupabaseDatabase:
             return None
 
     def insert_companies(self, companies):
+        if not companies:
+            self.logger.info("No new companies to insert")
+            return []
+
         try:
+            # ignore_duplicates keeps existing rows untouched instead of
+            # failing the whole batch on a primary-key collision
             response = (
                 self.supabase.table(self.companies_table)
-                .insert(companies)
+                .upsert(
+                    companies,
+                    on_conflict="company_name",
+                    ignore_duplicates=True,
+                )
                 .execute()
             )
 
@@ -85,8 +95,21 @@ class SupabaseDatabase:
 
             return response.data
         except Exception:
-            self.logger.exception("Failed inserting internships")
+            self.logger.exception("Failed inserting companies")
             return None
+
+    def get_existing_company_names(self):
+        try:
+            response = (
+                self.supabase.table(self.companies_table)
+                .select("company_name")
+                .execute()
+            )
+
+            return [row["company_name"] for row in response.data]
+        except Exception:
+            self.logger.exception("Failed fetching existing company names")
+            return []
 
     def get_all_internships(self):
         try:
@@ -204,6 +227,28 @@ class SupabaseDatabase:
             return None
         except Exception:
             self.logger.exception("Failed fetching repo last updated time")
+            return None
+
+    def get_company_info(self, company_name):
+        try:
+            response = (
+                self.supabase.table(self.companies_table)
+                .select("""
+                    company_name,
+                    company_website,
+                    company_domain,
+                    company_linkedin,
+                    company_logo,
+                """)
+                .eq("company_name", company_name)
+                .execute()
+            )
+            self.logger.info("Found %d company info", len(response.data))
+            if (len(response.data) != 0):
+                return response.data[0]
+            return None
+        except Exception:
+            self.logger.exception("Failed fetching company info")
             return None
 
     def mark_as_sent(self, internship_id):
