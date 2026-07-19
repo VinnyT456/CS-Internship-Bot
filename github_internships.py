@@ -296,19 +296,75 @@ class CompanySearch:
 
         return best_url
 
+    # Slug must resemble the company name this much or we return None —
+    # a search-URL fallback beats linking the wrong company
+    MIN_LINKEDIN_SCORE = 60
+
     def _find_linkedin(self, company):
 
         results = self._search(
             f'site:linkedin.com/company "{company}"'
         )
 
+        company_core = self._normalize_company(company)
+
+        best_url = None
+        best_slug = None
+        best_score = 0
+
         for result in results:
 
             url = result.get("href")
 
-            if url and "linkedin.com/company/" in url:
-                return url
+            if not url or "linkedin.com/company/" not in url:
+                continue
 
+            slug = (
+                url.split("linkedin.com/company/", 1)[1]
+                .split("/")[0]
+                .split("?")[0]
+            )
+            slug_clean = self._clean(slug)
+            title_clean = self._clean(result.get("title") or "")
+
+            if slug_clean == company_core:
+                score = 100
+            elif company_core and (
+                slug_clean.startswith(company_core)
+                or company_core.startswith(slug_clean)
+            ):
+                score = 75
+            elif company_core and (
+                company_core in slug_clean or slug_clean in company_core
+            ):
+                # Mid-string containment is weak: 'aquatic' appears inside
+                # 'aquarena-aquatic-leisure-centre' without being that company
+                score = 40
+            else:
+                score = int(
+                    SequenceMatcher(None, company_core, slug_clean).ratio() * 100
+                )
+
+            if company_core and company_core in title_clean:
+                score += 15
+
+            # Tie-break on slug length: 'optiver' beats 'optiver-medellin',
+            # 'd.-e.-shaw-&-co.' beats the India-subsidiary slug
+            if score > best_score or (
+                score == best_score
+                and best_slug is not None
+                and len(slug) < len(best_slug)
+            ):
+                best_score = score
+                best_slug = slug
+                best_url = f"https://www.linkedin.com/company/{slug}/"
+
+        if best_score >= self.MIN_LINKEDIN_SCORE:
+            return best_url
+
+        self.logger.info(
+            "No confident LinkedIn for %s (best score %d)", company, best_score
+        )
         return None
 
     @staticmethod
