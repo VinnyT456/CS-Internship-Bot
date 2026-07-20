@@ -658,8 +658,12 @@ class CompanySearch:
 
     @lru_cache(maxsize=2048)
     def get_company_info(self, company, job_urls=()):
-        if company in self.supabase_db.get_existing_company_names():
-            return self.supabase_db.get_company_info(company)
+        # Serve from the DB only when the row is actually enriched —
+        # bare NULL rows must fall through so the enrichment worker
+        # can search them
+        cached = self.supabase_db.get_company_info(company)
+        if cached and cached.get("company_website"):
+            return cached
 
         website = self._find_best_website(company, job_urls)
 

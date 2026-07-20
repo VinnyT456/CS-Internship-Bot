@@ -338,13 +338,10 @@ class SupabaseDatabase:
         try:
             response = (
                 self.supabase.table(self.companies_table)
-                .select("""
-                    company_name,
-                    company_website,
-                    company_domain,
-                    company_linkedin,
-                    company_logo,
-                """)
+                .select(
+                    "company_name,company_website,company_domain,"
+                    "company_linkedin,company_logo"
+                )
                 .eq("company_name", company_name)
                 .execute()
             )

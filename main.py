@@ -146,7 +146,7 @@ async def get_cached_channel(cache_key, channel_id):
 async def cache_channels():
     await get_cached_channel("welcome", WELCOME_CHANNEL_ID)
     await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
-    await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
+    #await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
     await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
 
 
@@ -356,7 +356,10 @@ async def before_check():
     await bot.wait_until_ready()
 
 
-@tasks.loop(hours=1)
+# 10-minute cadence: cheap no-op when backlog is empty (one DB query),
+# clears a large backlog steadily (max 20 searches per tick) without the
+# hour-long stall the first tick's startup race used to cause.
+@tasks.loop(minutes=10)
 async def enrich_companies_task():
     try:
         await asyncio.to_thread(enrich_company_batch)
