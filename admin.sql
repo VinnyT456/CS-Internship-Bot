@@ -18,6 +18,9 @@ CREATE TABLE public.company_info (
 
     last_updated_at TIMESTAMPTZ DEFAULT NOW(),
 
+    last_enriched_at TIMESTAMPTZ,
+    enrich_attempts INT NOT NULL DEFAULT 0,
+
     UNIQUE (company_name)
 );
 
@@ -42,6 +45,7 @@ CREATE TABLE public.internships (
 
 ALTER TABLE public.company_info DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.internships DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.repo_info DISABLE ROW LEVEL SECURITY;
 alter publication supabase_realtime add table public.internships;
 alter publication supabase_realtime add table public.company_info;
 alter publication supabase_realtime add table public.repo_info;

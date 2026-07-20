@@ -21,6 +21,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID"))
 INTERNSHIPS_CHANNEL_ID = int(os.getenv("INTERNSHIPS_CHANNEL_ID"))
+TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
 NEW_GRADS_CHANNEL_ID = int(os.getenv("NEW_GRADS_CHANNEL_ID"))
 
 CATEGORY_COLORS = {
@@ -112,6 +113,21 @@ def update_internship_message_id(internship_id, message_id):
     supabase_db.update_internship_message_id(internship_id, message_id)
 
 
+def enrich_company_batch():
+    github_internships = GithubInternships()
+    return github_internships.enrich_companies()
+
+
+def get_sent_message_ids():
+    supabase_db = SupabaseDatabase()
+    return supabase_db.get_sent_message_ids()
+
+
+def clear_internship_message_id(internship_id):
+    supabase_db = SupabaseDatabase()
+    supabase_db.clear_internship_message_id(internship_id)
+
+
 async def get_cached_channel(cache_key, channel_id):
     channel = CHANNEL_CACHE.get(cache_key)
 
@@ -130,6 +146,7 @@ async def get_cached_channel(cache_key, channel_id):
 async def cache_channels():
     await get_cached_channel("welcome", WELCOME_CHANNEL_ID)
     await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+    await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
     await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
 
 
@@ -185,7 +202,7 @@ def format_location(location):
 
 
 async def send_internship(internship):
-    channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+    channel = await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
 
     company_info = normalize_company_info(internship.get("company_info"))
 
@@ -335,6 +352,19 @@ async def check_new_internships():
 
 @check_new_internships.before_loop
 async def before_check():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(hours=1)
+async def enrich_companies_task():
+    try:
+        await asyncio.to_thread(enrich_company_batch)
+    except Exception:
+        logger.exception("Company enrichment batch failed")
+
+
+@enrich_companies_task.before_loop
+async def before_enrich():
     await bot.wait_until_ready()
 
 
@@ -513,6 +543,54 @@ async def testwelcome(interaction: discord.Interaction):
     await interaction.followup.send("Welcome message fired. Check the channel.")
 
 
+@bot.tree.command(
+    name="clearinternships",
+    description="Delete all bot-posted internship messages (uses stored message IDs)",
+)
+@discord.app_commands.default_permissions(administrator=True)
+async def clearinternships(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+        rows = await asyncio.to_thread(get_sent_message_ids)
+    except Exception:
+        logger.exception("Failed preparing clearinternships")
+        await interaction.followup.send("Failed to fetch stored message IDs.")
+        return
+
+    if not rows:
+        await interaction.followup.send("No stored message IDs — nothing to delete.")
+        return
+
+    deleted = 0
+    missing = 0
+    failed = 0
+
+    for row in rows:
+        message_id = row["discord_message_id"]
+
+        try:
+            await channel.get_partial_message(message_id).delete()
+            deleted += 1
+        except discord.NotFound:
+            # Already deleted by hand — still clear the stale ID below
+            missing += 1
+        except discord.HTTPException:
+            logger.exception("Failed deleting message %s", message_id)
+            failed += 1
+            continue
+
+        await asyncio.to_thread(clear_internship_message_id, row["id"])
+
+        # Stay under Discord's rate limit
+        await asyncio.sleep(0.5)
+
+    await interaction.followup.send(
+        f"Deleted {deleted} message(s), {missing} already gone, {failed} failed."
+    )
+
+
 @bot.event
 async def on_ready():
     global BOT_AVATAR_URL
@@ -527,12 +605,17 @@ async def on_ready():
 
     # Sync commands once per process. Re-syncing on every reconnect can trigger
     # Discord rate limits quickly.
+    #
+    # Guild-scoped only: guild sync is instant, and registering the same
+    # commands both globally and per-guild makes Discord list them twice.
+    # The empty global sync below removes previously-registered global copies.
     if not COMMANDS_SYNCED:
         try:
             for guild in bot.guilds:
                 bot.tree.copy_global_to(guild=guild)
                 await bot.tree.sync(guild=guild)
 
+            bot.tree.clear_commands(guild=None)
             await bot.tree.sync()
             COMMANDS_SYNCED = True
         except Exception:
@@ -540,6 +623,9 @@ async def on_ready():
 
     if not check_new_internships.is_running():
         check_new_internships.start()
+
+    if not enrich_companies_task.is_running():
+        enrich_companies_task.start()
 
     logger.info("Bot ready as %s", bot.user)
 

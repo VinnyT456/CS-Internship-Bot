@@ -98,18 +98,123 @@ class SupabaseDatabase:
             self.logger.exception("Failed inserting companies")
             return None
 
-    def get_existing_company_names(self):
+    def insert_company_names(self, names):
+        """Bare company rows (metadata NULL) for the enrichment worker to
+        fill in later. Existing rows untouched."""
+        if not names:
+            return []
+
         try:
             response = (
                 self.supabase.table(self.companies_table)
-                .select("company_name")
+                .upsert(
+                    [{"company_name": name} for name in names],
+                    on_conflict="company_name",
+                    ignore_duplicates=True,
+                )
                 .execute()
             )
 
-            return [row["company_name"] for row in response.data]
+            self.logger.info(
+                "Inserted %d bare company rows for later enrichment",
+                len(response.data),
+            )
+
+            return response.data
         except Exception:
-            self.logger.exception("Failed fetching existing company names")
+            self.logger.exception("Failed inserting bare company names")
+            return None
+
+    def get_companies_needing_enrichment(self, limit=20, max_attempts=3):
+        try:
+            response = (
+                self.supabase.table(self.companies_table)
+                .select("company_name,enrich_attempts")
+                .is_("company_website", "null")
+                .lt("enrich_attempts", max_attempts)
+                .order("enrich_attempts", desc=False)
+                .limit(limit)
+                .execute()
+            )
+
+            self.logger.info(
+                "Found %d companies needing enrichment", len(response.data)
+            )
+
+            return response.data
+        except Exception:
+            self.logger.exception("Failed fetching companies needing enrichment")
             return []
+
+    def update_company_info(self, company_name, info, attempts):
+        try:
+            (
+                self.supabase.table(self.companies_table)
+                .update(
+                    {
+                        "company_website": info.get("company_website"),
+                        "company_domain": info.get("company_domain"),
+                        "company_linkedin": info.get("company_linkedin"),
+                        "company_logo": info.get("company_logo"),
+                        "last_enriched_at": "now()",
+                        "enrich_attempts": attempts,
+                    }
+                )
+                .eq("company_name", company_name)
+                .execute()
+            )
+
+            self.logger.info("Updated company info for %s", company_name)
+        except Exception:
+            self.logger.exception("Failed updating company info for %s", company_name)
+
+    def get_company_job_urls(self, company_name, limit=5):
+        try:
+            response = (
+                self.supabase.table(self.internships_table)
+                .select("job_url")
+                .eq("company_name", company_name)
+                .limit(limit)
+                .execute()
+            )
+
+            return [
+                row["job_url"] for row in response.data if row.get("job_url")
+            ]
+        except Exception:
+            self.logger.exception("Failed fetching job urls for %s", company_name)
+            return []
+
+    def get_sent_message_ids(self):
+        try:
+            response = (
+                self.supabase.table(self.internships_table)
+                .select("id,discord_message_id")
+                .not_.is_("discord_message_id", "null")
+                .execute()
+            )
+
+            self.logger.info(
+                "Found %d internships with stored message IDs", len(response.data)
+            )
+
+            return response.data
+        except Exception:
+            self.logger.exception("Failed fetching sent message IDs")
+            return []
+
+    def clear_internship_message_id(self, internship_id):
+        try:
+            (
+                self.supabase.table(self.internships_table)
+                .update({"discord_message_id": None})
+                .eq("id", internship_id)
+                .execute()
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed clearing message ID for internship %s", internship_id
+            )
 
     def get_all_internships(self):
         try:
@@ -251,6 +356,21 @@ class SupabaseDatabase:
             self.logger.exception("Failed fetching company info")
             return None
 
+    def get_existing_company_names(self):
+        try:
+            response = (
+                self.supabase.table(self.companies_table)
+                .select("company_name")
+                .execute()
+            )
+            self.logger.info("Found %d existing company names", len(response.data))
+            if (len(response.data) != 0):
+                return [row["company_name"] for row in response.data]
+            return []
+        except Exception:
+            self.logger.exception("Failed fetching existing company names")
+            return []
+
     def mark_as_sent(self, internship_id):
         (
             self.supabase.table(self.internships_table)
@@ -301,4 +421,4 @@ class SupabaseDatabase:
 
 if __name__ == "__main__":
     database = SupabaseDatabase()
-    print(database.get_repo_last_updated_time("vanshb03/Summer2027-Internships"))
+    print(database.get_existing_company_names())

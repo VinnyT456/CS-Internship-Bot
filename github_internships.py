@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from ddgs import DDGS
 from ddgs.exceptions import DDGSException
 import re
+import requests
 from difflib import SequenceMatcher
 
 
@@ -102,28 +103,81 @@ class CompanySearch:
     # Best domain must clear this or we return None instead of junk
     MIN_WEBSITE_SCORE = 30
 
+    # ATS hosts embed the company slug in the job URL — free, deterministic
+    # signal for cross-checking search results
+    ATS_HOST_SLUG_PATTERNS = (
+        r"(?:boards|job-boards)\.greenhouse\.io/([A-Za-z0-9_-]+)",
+        r"jobs\.lever\.co/([A-Za-z0-9_-]+)",
+        r"jobs\.ashbyhq\.com/([A-Za-z0-9_-]+)",
+        r"([A-Za-z0-9-]+)\.wd\d+\.myworkdayjobs\.com",
+        r"jobs\.smartrecruiters\.com/([A-Za-z0-9_-]+)",
+        r"apply\.workable\.com/([A-Za-z0-9_-]+)",
+        r"([A-Za-z0-9-]+)\.recruitee\.com",
+        r"([A-Za-z0-9-]+)\.breezy\.hr",
+    )
+
+    # Wikidata entity descriptions must look like a business before we
+    # trust their official-website claim (P856)
+    BUSINESS_WORDS = (
+        "company",
+        "corporation",
+        "business",
+        "firm",
+        "enterprise",
+        "manufacturer",
+        "conglomerate",
+        "bank",
+        "fund",
+        "trading",
+        "technology",
+        "software",
+        "developer",
+        "retailer",
+        "startup",
+        "defense",
+        "defence",
+        "contractor",
+        "exchange",
+        "provider",
+        "services",
+    )
+
+    WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+    HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (CSInternshipBot/1.0)"}
+
     def __init__(self):
         self.ddgs = DDGS()
+        self.supabase_db = SupabaseDatabase()
 
         self.logger = logging.getLogger("github_internships")
 
-    def _search(self, query, max_results=8, retries=3):
-        for attempt in range(retries):
-            try:
-                return list(
-                    self.ddgs.text(
-                        query,
-                        max_results=max_results,
+    # Tried in order; one engine throttling us doesn't kill the search
+    SEARCH_BACKENDS = ("duckduckgo", "bing", "brave")
+
+    def _search(self, query, max_results=8, retries=2):
+        for backend in self.SEARCH_BACKENDS:
+            for attempt in range(retries):
+                try:
+                    results = list(
+                        self.ddgs.text(
+                            query,
+                            max_results=max_results,
+                            backend=backend,
+                        )
                     )
-                )
 
-            except DDGSException as e:
-                self.logger.warning(e)
+                    if results:
+                        return results
 
-                if attempt == retries - 1:
-                    return []
+                    break  # empty result set: try next backend
 
-                time.sleep(1)
+                except DDGSException as e:
+                    self.logger.warning("%s: %s", backend, e)
+
+                    if attempt == retries - 1:
+                        break  # exhausted retries: try next backend
+
+                    time.sleep(1)
 
         return []
 
@@ -171,9 +225,17 @@ class CompanySearch:
         domain_root = self._clean(self._domain_root(domain))
         title_clean = self._clean(title or "")
 
+        # Acronym: 'Susquehanna Investment Group' -> 'sig' == sig.com
+        words = re.findall(r"[a-z]+", company.lower())
+        initials = "".join(
+            w[0] for w in words if w not in ("the", "of", "and")
+        )
+
         # Exact domain match is the strongest possible signal
         if domain_root == company_core:
             score += 100
+        elif len(initials) >= 3 and domain_root == initials:
+            score += 70
         elif domain_root.startswith(company_core) or company_core.startswith(domain_root):
             score += 55
         elif company_core in domain_clean:
@@ -219,7 +281,178 @@ class CompanySearch:
 
         return score
 
-    def _find_best_website(self, company):
+    def _job_url_signals(self, job_urls):
+        """Extract (direct company domains, ATS company slugs) from the
+        internship posting URLs themselves."""
+        domains = set()
+        slugs = set()
+
+        for url in job_urls or ():
+            if not url:
+                continue
+
+            parsed = urlparse(url)
+            netloc = parsed.netloc.lower().replace("www.", "")
+
+            if not netloc:
+                continue
+
+            haystack = netloc + parsed.path.lower()
+
+            matched_slug = None
+            for pattern in self.ATS_HOST_SLUG_PATTERNS:
+                match = re.search(pattern, haystack)
+                if match:
+                    matched_slug = match.group(1).lower()
+                    break
+
+            if matched_slug:
+                slugs.add(matched_slug)
+                continue
+
+            # A non-ATS, non-junk posting URL points at the company's own site
+            if any(bad in netloc for bad in self.BAD_DOMAINS):
+                continue
+
+            domains.add(netloc)
+
+        return domains, slugs
+
+    def _wikidata_website(self, company, retries=3):
+        """Official website (P856) from Wikidata; high precision for
+        established companies."""
+        for attempt in range(retries):
+            try:
+                return self._wikidata_website_once(company)
+            except Exception:
+                if attempt == retries - 1:
+                    self.logger.warning("Wikidata lookup failed for %s", company)
+                    return None
+                time.sleep(2)
+
+    def _wikidata_website_once(self, company):
+        response = requests.get(
+            self.WIKIDATA_API,
+            params={
+                "action": "wbsearchentities",
+                "search": company,
+                "language": "en",
+                "format": "json",
+                "type": "item",
+                "limit": 5,
+            },
+            headers=self.HTTP_HEADERS,
+            timeout=8,
+        )
+
+        for hit in response.json().get("search", []):
+            description = (hit.get("description") or "").lower()
+
+            if not any(word in description for word in self.BUSINESS_WORDS):
+                continue
+
+            claims_response = requests.get(
+                self.WIKIDATA_API,
+                params={
+                    "action": "wbgetclaims",
+                    "entity": hit["id"],
+                    "property": "P856",
+                    "format": "json",
+                },
+                headers=self.HTTP_HEADERS,
+                timeout=8,
+            )
+
+            claims = claims_response.json().get("claims", {}).get("P856", [])
+
+            if claims:
+                url = claims[0]["mainsnak"]["datavalue"]["value"]
+                self.logger.info("Wikidata website for %s: %s", company, url)
+                return url
+
+        return None
+
+    def _verify_website(self, url, company):
+        """Fetch the candidate and confirm it mentions the company.
+        Returns True (verified), False (positively wrong), or None
+        (inconclusive — network error or anti-bot response)."""
+        company_core = self._normalize_company(company)
+        try:
+            response = requests.get(
+                url,
+                headers=self.HTTP_HEADERS,
+                timeout=6,
+                allow_redirects=True,
+            )
+        except requests.RequestException:
+            return None
+
+        # Anti-bot walls say nothing about correctness
+        if response.status_code in (401, 403, 429, 503):
+            return None
+
+        if response.status_code >= 400:
+            return False
+
+        final_domain = urlparse(response.url).netloc.lower().replace("www.", "")
+
+        if any(bad in final_domain for bad in self.BAD_DOMAINS):
+            return False
+
+        if not company_core:
+            return None
+
+        head = response.text[:20000].lower()
+        head_clean = self._clean(head)
+
+        # Accept if any distinctive form of the name appears: full core,
+        # acronym ('sig' for Susquehanna Investment Group), or the longest
+        # word ('susquehanna') — DB names often differ slightly from the
+        # company's own branding
+        name_words = re.findall(r"[a-z0-9]+", company.lower()) or [company_core]
+        longest_word = max(name_words, key=len)
+
+        needles = {company_core, longest_word}
+
+        if len(name_words) >= 3:
+            needles.add("".join(w[0] for w in name_words))
+
+        for needle in needles:
+            if needle and len(needle) >= 3 and needle in head_clean:
+                return True
+
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", head, re.S)
+
+        if title_match:
+            title_clean = self._clean(title_match.group(1))
+            similarity = SequenceMatcher(
+                None, company_core, title_clean[: len(company_core) + 5]
+            ).ratio()
+            if similarity >= 0.7:
+                return True
+            return False
+
+        return None
+
+    def _canonicalize(self, url, path_depth, company):
+        """Deep link on a strongly-matching domain -> homepage."""
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower().replace("www.", "")
+        domain_root = self._clean(self._domain_root(domain))
+        company_core = self._normalize_company(company)
+
+        strong_match = (
+            domain_root == company_core
+            or SequenceMatcher(None, company_core, domain_root).ratio() >= 0.8
+        )
+
+        if path_depth > 1 and strong_match:
+            scheme = parsed.scheme or "https"
+            return f"{scheme}://{parsed.netloc}/"
+
+        return url
+
+    def _find_best_website(self, company, job_urls=()):
 
         queries = [
             f'"{company}" official website',
@@ -265,42 +498,74 @@ class CompanySearch:
                 if best is None or (score, -path_depth) > (best[0], -best[1]):
                     domain_best[domain] = (score, path_depth, url)
 
+        # --- Merge in high-precision signals -------------------------------
+
+        # 1. Domains taken straight from the company's own job posting URLs
+        direct_domains, ats_slugs = self._job_url_signals(job_urls)
+
+        for domain in direct_domains:
+            domain_scores[domain] = domain_scores.get(domain, 0) + 90
+            domain_best.setdefault(domain, (90, 0, f"https://{domain}/"))
+
+        # 2. Wikidata official website
+        wikidata_url = self._wikidata_website(company)
+
+        if wikidata_url:
+            wd_domain = urlparse(wikidata_url).netloc.lower().replace("www.", "")
+            domain_scores[wd_domain] = domain_scores.get(wd_domain, 0) + 90
+            domain_best.setdefault(wd_domain, (90, 0, wikidata_url))
+
+        # 3. ATS slugs corroborate matching search candidates
+        for slug in ats_slugs:
+            slug_clean = self._clean(slug)
+            for domain in list(domain_scores):
+                root = self._clean(self._domain_root(domain))
+                if (
+                    root == slug_clean
+                    or root.startswith(slug_clean)
+                    or slug_clean.startswith(root)
+                ):
+                    domain_scores[domain] += 40
+
         if not domain_scores:
             return None
 
-        best_domain = max(domain_scores, key=domain_scores.get)
+        # --- Pick the best candidate that survives live verification ------
 
-        if domain_scores[best_domain] < self.MIN_WEBSITE_SCORE:
-            self.logger.info(
-                "No confident website for %s (best: %s, score %d)",
-                company,
-                best_domain,
-                domain_scores[best_domain],
-            )
-            return None
-
-        best_score, best_depth, best_url = domain_best[best_domain]
-
-        # If the winner is a deep link on a domain that clearly matches the
-        # company, canonicalize to the homepage.
-        domain_root = self._clean(self._domain_root(best_domain))
         company_core = self._normalize_company(company)
-        strong_match = (
-            domain_root == company_core
-            or SequenceMatcher(None, company_core, domain_root).ratio() >= 0.8
+
+        ranked = sorted(
+            domain_scores.items(), key=lambda item: item[1], reverse=True
         )
 
-        if best_depth > 1 and strong_match:
-            scheme = urlparse(best_url).scheme or "https"
-            return f"{scheme}://{urlparse(best_url).netloc}/"
+        for domain, score in ranked[:3]:
 
-        return best_url
+            if score < self.MIN_WEBSITE_SCORE:
+                break
+
+            _, path_depth, url = domain_best[domain]
+            candidate = self._canonicalize(url, path_depth, company)
+
+            verdict = self._verify_website(candidate, company)
+
+            if verdict is False:
+                self.logger.info(
+                    "Rejected %s for %s: page does not match company",
+                    candidate,
+                    company,
+                )
+                continue
+
+            return candidate
+
+        self.logger.info("No confident website for %s", company)
+        return None
 
     # Slug must resemble the company name this much or we return None —
     # a search-URL fallback beats linking the wrong company
     MIN_LINKEDIN_SCORE = 60
 
-    def _find_linkedin(self, company):
+    def _find_linkedin(self, company, domain_root=None):
 
         results = self._search(
             f'site:linkedin.com/company "{company}"'
@@ -348,6 +613,14 @@ class CompanySearch:
             if company_core and company_core in title_clean:
                 score += 15
 
+            # Slug agreeing with the verified website domain is strong
+            # cross-source confirmation
+            if domain_root and (
+                slug_clean == domain_root
+                or slug_clean.startswith(domain_root)
+            ):
+                score += 25
+
             # Tie-break on slug length: 'optiver' beats 'optiver-medellin',
             # 'd.-e.-shaw-&-co.' beats the India-subsidiary slug
             if score > best_score or (
@@ -384,17 +657,20 @@ class CompanySearch:
         return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
 
     @lru_cache(maxsize=2048)
-    def get_company_info(self, company):
+    def get_company_info(self, company, job_urls=()):
+        if company in self.supabase_db.get_existing_company_names():
+            return self.supabase_db.get_company_info(company)
 
-        website = self._find_best_website(company)
+        website = self._find_best_website(company, job_urls)
 
         domain = self._get_domain(website)
+        domain_root = self._clean(self._domain_root(domain)) if domain else None
 
         return {
             "company_name": company,
             "company_website": website,
             "company_domain": domain,
-            "company_linkedin": self._find_linkedin(company),
+            "company_linkedin": self._find_linkedin(company, domain_root),
             "company_logo": self._get_logo(domain),
         }
 
@@ -420,10 +696,29 @@ class GithubInternships:
 
         self.repos = [
             "vanshb03/Summer2027-Internships",
+            "sndsh404/summer-2027-internships"
         ]
 
-        self.df = pd.DataFrame()
+        self.repo_column_name = {
+            "vanshb03/Summer2027-Internships": {
+                "Company": "company_name",
+                "Role": "job_title",
+                "Location": "job_location",
+                "Application/Link": "job_url",
+                "Date Posted": "job_posted_at",
+            },
+            "sndsh404/summer-2027-internships": {
+                "Company": "company_name",
+                "Role": "job_title",
+                "Location": "job_location",
+                "Apply": "job_url",
+                "Added": "job_posted_at",
+            },
+        }
+
+
         self.urls = np.array([])
+        self.current_repo_name = None
 
         self.logger.info("Github internships scraper initialized")
 
@@ -445,35 +740,7 @@ class GithubInternships:
             self.logger.info("Found %d application URLs", len(urls))
             self.logger.info("Extracted %d internship rows", len(df))
 
-            if repo_name == "vanshb03/Summer2027-Internships":
-                issues = self.get_issues(repo)
-                internships = self.parse_issue(issues)
-                self.logger.info("Parsed %d internships from issues", len(internships))
-                df = pd.concat([df, pd.DataFrame(internships)], ignore_index=True)
-
-            # Only run web searches for companies not already stored —
-            # the DB row is the source of truth for known companies.
-            existing_names = set(self.supabase_db.get_existing_company_names())
-
-            new_names = [
-                company
-                for company in df["company_name"].unique()
-                if company not in existing_names
-            ]
-
-            self.logger.info(
-                "Company lookup: %d unique, %d already known, %d to search",
-                df["company_name"].nunique(),
-                df["company_name"].nunique() - len(new_names),
-                len(new_names),
-            )
-
-            company_info = {
-                company: self.company_search.get_company_info(company)
-                for company in new_names
-            }
-
-            companies = list(company_info.values())
+            companies = self.build_company_info(df)
             internships = df.to_dict(orient="records")
 
             return internships, companies
@@ -482,16 +749,102 @@ class GithubInternships:
             self.logger.exception("Failed to generate internships")
             raise
 
+    # Small batches enrich inline so first Discord posts have full company
+    # info; big batches defer to the hourly enrichment worker
+    SYNC_ENRICH_THRESHOLD = 5
+
+    def build_company_info(self, df):
+        existing_names = set(self.supabase_db.get_existing_company_names())
+
+        new_names = [
+            company
+            for company in df["company_name"].unique()
+            if company not in existing_names
+        ]
+
+        self.logger.info(
+            "Company lookup: %d unique, %d already known, %d to search",
+            df["company_name"].nunique(),
+            df["company_name"].nunique() - len(new_names),
+            len(new_names),
+        )
+
+        if len(new_names) > self.SYNC_ENRICH_THRESHOLD:
+            self.logger.info(
+                "%d new companies exceeds sync threshold %d — "
+                "inserting bare rows, deferring to enrichment worker",
+                len(new_names),
+                self.SYNC_ENRICH_THRESHOLD,
+            )
+            return [{"company_name": name} for name in new_names]
+
+        company_info = {
+            company: self.company_search.get_company_info(
+                company,
+                tuple(
+                    df.loc[df["company_name"] == company, "job_url"]
+                    .dropna()
+                    .head(5)
+                ),
+            )
+            for company in new_names
+        }
+
+        return list(company_info.values())
+
+    ENRICH_BATCH_SIZE = 20
+    ENRICH_SLEEP_SECONDS = 3
+
+    def enrich_companies(self, limit=None):
+        """Background enrichment: fill in metadata for companies whose
+        website is still NULL, paced to stay under search-engine rate
+        limits. Failed companies retry up to the DB-side attempt cap."""
+        limit = limit or self.ENRICH_BATCH_SIZE
+
+        rows = self.supabase_db.get_companies_needing_enrichment(limit=limit)
+
+        if not rows:
+            self.logger.info("No companies need enrichment")
+            return 0
+
+        # Retries must not be served a cached failure from a prior batch
+        self.company_search.get_company_info.cache_clear()
+
+        enriched = 0
+
+        for row in rows:
+            name = row["company_name"]
+            attempts = (row.get("enrich_attempts") or 0) + 1
+
+            job_urls = tuple(self.supabase_db.get_company_job_urls(name))
+            info = self.company_search.get_company_info(name, job_urls)
+
+            self.supabase_db.update_company_info(name, info, attempts)
+
+            if info.get("company_website"):
+                enriched += 1
+
+            time.sleep(self.ENRICH_SLEEP_SECONDS)
+
+        self.logger.info(
+            "Enrichment batch done: %d/%d websites found", enriched, len(rows)
+        )
+
+        return enriched
+
     def generate_db(self, soup):
         try:
-            dfs = pd.read_html(StringIO(str(soup)))
-            df = pd.concat(dfs, ignore_index=True)
+            df = pd.read_html(StringIO(str(soup)))[0]
+            df = df.rename(self.repo_column_name[self.current_repo_name], axis=1)
+            df["job_posted_at"] = df["job_posted_at"].replace("-", pd.NA)
+            df.dropna(inplace=True)
 
-            df["Date Posted"] = df["Date Posted"].apply(self.normalize_date)
+            df["job_posted_at"] = df["job_posted_at"].apply(self.normalize_date)
             cutoff = datetime(2026, 6, 1)
             self.logger.info("Filtering internships posted after %s", cutoff)
-            df = df[df["Date Posted"] >= cutoff]
-            df["Date Posted"] = df["Date Posted"].dt.strftime("%Y-%m-%d")
+            df = df[df["job_posted_at"] >= cutoff]
+            df["job_posted_at"] = df["job_posted_at"].dt.strftime("%Y-%m-%d")
+
             return df
 
         except Exception:
@@ -544,12 +897,13 @@ class GithubInternships:
     def parse_issue(self, issues):
         internships = []
         for issue in issues:
+            if issue.title != "New Internship" or not issue.body:
+                continue
+
             posted_date = issue.created_at.strftime("%Y-%m-%d")
 
-            if issue.title != "New Internship":
-                continue
-            issue = self.markdown.render(issue.body)
-            soup = BeautifulSoup(issue, "html.parser")
+            rendered = self.markdown.render(issue.body)
+            soup = BeautifulSoup(rendered, "html.parser")
 
             fields = {}
             for heading in soup.find_all("h3"):
@@ -557,12 +911,23 @@ class GithubInternships:
                 if value:
                     fields[heading.get_text(strip=True)] = value.get_text(strip=True)
 
+            company_name = fields.get("Company Name")
+            job_title = fields.get("Internship Title")
+            job_url = fields.get("Link to Internship Posting")
+
+            if not all((company_name, job_title, job_url)):
+                self.logger.warning(
+                    "Skipping malformed issue #%s: missing required fields",
+                    issue.number,
+                )
+                continue
+
             internship = {
-                "company_name": fields.get("Company Name"),
-                "job_title": fields.get("Internship Title"),
-                "job_url": fields.get("Link to Internship Posting"),
+                "company_name": company_name,
+                "job_title": job_title,
+                "job_url": job_url,
                 "job_location": fields.get("Location"),
-                "job_type": self.classify_role(fields.get("Internship Title")),
+                "job_type": self.classify_role(job_title),
                 "job_posted_at": posted_date,
                 "source_repo": "https://github.com/vanshb03/Summer2027-Internships",
             }
@@ -581,39 +946,21 @@ class GithubInternships:
 
         before = len(df)
 
-        df = df[df["Application/Link"] != "🔒"]
+        df = df[df["job_url"] != "🔒"]
 
         self.logger.info("Removed %d locked applications", before - len(df))
 
-        df["Application/Link"] = urls
+        df["job_url"] = urls
 
-        df["Source Repo"] = "https://github.com/vanshb03/Summer2027-Internships"
+        df["source_repo"] = "https://github.com/vanshb03/Summer2027-Internships"
 
-        df["Role"] = (
-            df["Role"]
+        df["job_title"] = (
+            df["job_title"]
             .apply(lambda x: emoji.replace_emoji(str(x), replace=""))
             .str.strip()
         )
 
-        df["Category"] = df["Role"].apply(self.classify_role)
-
-        self.logger.info("Role categories generated")
-
-        df.rename(
-            columns={
-                "Company": "company_name",
-                "Role": "job_title",
-                "Location": "job_location",
-                "Application/Link": "job_url",
-                "Source Repo": "source_repo",
-                "Category": "job_type",
-                "Date Posted": "job_posted_at",
-            },
-            inplace=True,
-        )
-
-        self.logger.info("Renamed columns")
-
+        df["job_type"] = df["job_title"].apply(self.classify_role)
         return df
 
     def classify_role(self, title):
@@ -684,8 +1031,41 @@ class GithubInternships:
         current_year = datetime.now().year
         return datetime.strptime(f"{date_str} {current_year}", "%b %d %Y")
 
+    def insert_issues_internships(self):
+        try:
+            repo = self.get_repo("vanshb03/Summer2027-Internships")
+            issues = self.get_issues(repo)
+            internships = self.parse_issue(issues)
+
+            self.logger.info(
+                "Parsed %d internships from issues", len(internships)
+            )
+
+            if not internships:
+                return []
+
+            df = pd.DataFrame(internships)
+
+            cutoff = datetime(2026, 6, 1)
+            df = df[pd.to_datetime(df["job_posted_at"]) >= cutoff]
+
+            if df.empty:
+                self.logger.info("No issue internships after cutoff")
+                return []
+
+            internships = df.to_dict(orient="records")
+
+            companies = self.build_company_info(df)
+            self.supabase_db.insert_companies(companies)
+            return self.supabase_db.insert_internships(internships)
+
+        except Exception:
+            self.logger.exception("Failed inserting issue internships")
+            return None
+
     def insert_internships(self):
         for repo_name in self.repos:
+            self.current_repo_name = repo_name
             full_repo_name = f"https://github.com/{repo_name}"
             current_commit_time = self.get_repo(repo_name).pushed_at.strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -704,7 +1084,17 @@ class GithubInternships:
             else:
                 self.logger.info("No new commits found in repo %s", repo_name)
 
+        # Issues flow is deliberately outside the commit-time gate
+        self.insert_issues_internships()
+
 
 if __name__ == "__main__":
     github_internships = GithubInternships()
-    github_internships.insert_internships()
+    github_internships.current_repo_name = "sndsh404/summer-2027-internships"
+    repo = github_internships.get_repo("sndsh404/summer-2027-internships")
+    #repo = github_internships.github.get_repo("vanshb03/Summer2027-Internships")
+    readme = github_internships.get_readme(repo)
+    html = github_internships.convert_to_html(readme)
+    soup = github_internships.parse_html(html)
+    df = github_internships.generate_db(soup)
+    print(df)
