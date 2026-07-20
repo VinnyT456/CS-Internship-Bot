@@ -203,17 +203,24 @@ class SupabaseDatabase:
             self.logger.exception("Failed fetching sent message IDs")
             return []
 
-    def clear_internship_message_id(self, internship_id):
+    def reset_internship_discord_state(self, internship_id):
+        """Message deleted from Discord: clear the stored ID and mark the
+        internship unsent so it can be posted again."""
         try:
             (
                 self.supabase.table(self.internships_table)
-                .update({"discord_message_id": None})
+                .update(
+                    {
+                        "discord_message_id": None,
+                        "sent_to_discord": False,
+                    }
+                )
                 .eq("id", internship_id)
                 .execute()
             )
         except Exception:
             self.logger.exception(
-                "Failed clearing message ID for internship %s", internship_id
+                "Failed resetting Discord state for internship %s", internship_id
             )
 
     def get_all_internships(self):

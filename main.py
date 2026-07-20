@@ -123,9 +123,9 @@ def get_sent_message_ids():
     return supabase_db.get_sent_message_ids()
 
 
-def clear_internship_message_id(internship_id):
+def reset_internship_discord_state(internship_id):
     supabase_db = SupabaseDatabase()
-    supabase_db.clear_internship_message_id(internship_id)
+    supabase_db.reset_internship_discord_state(internship_id)
 
 
 async def get_cached_channel(cache_key, channel_id):
@@ -574,24 +574,46 @@ async def clearinternships(interaction: discord.Interaction):
     for row in rows:
         message_id = row["discord_message_id"]
 
-        try:
-            await channel.get_partial_message(message_id).delete()
-            deleted += 1
-        except discord.NotFound:
-            # Already deleted by hand — still clear the stale ID below
-            missing += 1
-        except discord.HTTPException:
-            logger.exception("Failed deleting message %s", message_id)
+        # Retry transient Discord/network failures (e.g. 503s) so a blip
+        # doesn't leave the message behind
+        removed = False
+
+        for attempt in range(3):
+            try:
+                await channel.get_partial_message(message_id).delete()
+                deleted += 1
+                removed = True
+                break
+            except discord.NotFound:
+                # Already deleted by hand — still reset the row below
+                missing += 1
+                removed = True
+                break
+            except discord.HTTPException as e:
+                logger.warning(
+                    "Delete attempt %d/3 failed for message %s: %s",
+                    attempt + 1,
+                    message_id,
+                    e,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2)
+
+        if not removed:
+            logger.error("Giving up on message %s after 3 attempts", message_id)
             failed += 1
             continue
 
-        await asyncio.to_thread(clear_internship_message_id, row["id"])
+        # Message confirmed gone: clear the ID and mark unsent so the
+        # internship can be posted again
+        await asyncio.to_thread(reset_internship_discord_state, row["id"])
 
         # Stay under Discord's rate limit
         await asyncio.sleep(0.5)
 
     await interaction.followup.send(
-        f"Deleted {deleted} message(s), {missing} already gone, {failed} failed."
+        f"Deleted {deleted} message(s), {missing} already gone, {failed} failed.\n"
+        "Cleared internships are marked unsent and will re-post on the next cycle."
     )
 
 
