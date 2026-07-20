@@ -21,7 +21,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID"))
 INTERNSHIPS_CHANNEL_ID = int(os.getenv("INTERNSHIPS_CHANNEL_ID"))
-TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
+#TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
 NEW_GRADS_CHANNEL_ID = int(os.getenv("NEW_GRADS_CHANNEL_ID"))
 
 CATEGORY_COLORS = {
@@ -202,8 +202,9 @@ def format_location(location):
 
 
 async def send_internship(internship):
-    channel = await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
-
+    #channel = await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
+    channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+    
     company_info = normalize_company_info(internship.get("company_info"))
 
     company = company_info.get("company_name") or internship.get("company_name") or "Unknown"
