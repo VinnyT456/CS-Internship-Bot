@@ -22,7 +22,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID"))
 INTERNSHIPS_CHANNEL_ID = int(os.getenv("INTERNSHIPS_CHANNEL_ID"))
-TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
+#TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
 NEW_GRADS_CHANNEL_ID = int(os.getenv("NEW_GRADS_CHANNEL_ID"))
 
 CATEGORY_COLORS = {
@@ -148,7 +148,7 @@ async def get_cached_channel(cache_key, channel_id):
 async def cache_channels():
     await get_cached_channel("welcome", WELCOME_CHANNEL_ID)
     await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
-    await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
+    #await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
     await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
 
 
@@ -204,8 +204,8 @@ def format_location(location):
 
 
 async def send_internship(internship):
-    channel = await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
-    #channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+    #channel = await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
+    channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
     
     company_info = normalize_company_info(internship.get("company_info"))
 
