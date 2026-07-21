@@ -2,10 +2,10 @@ from internships.github_internships import GithubInternships
 
 
 class GithubNewGrad(GithubInternships):
-    """vanshb03/New-Grad-2026 — same markdown table format as the Summer2027
+    """vanshb03/New-Grad-2027 — same markdown table format as the Summer2027
     internships repo. Single repo, no GitHub-issues submission flow."""
 
-    REPO = "vanshb03/New-Grad-2026"
+    REPO = "vanshb03/New-Grad-2027"
     TABLE = "new_grads"
 
     def __init__(self):
@@ -41,7 +41,7 @@ class GithubNewGrad(GithubInternships):
                 self.supabase_db.insert_repo_update_time(
                     full_repo_name, current_commit_time
                 )
-                self.supabase_db.insert_internships(internships)
+                self.supabase_db.insert_internships(internships, self.TABLE)
             else:
                 self.logger.info("No new commits found in repo %s", repo_name)
         # No issues flow — this repo has no submission issues

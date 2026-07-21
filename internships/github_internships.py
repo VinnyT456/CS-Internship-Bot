@@ -13,7 +13,7 @@ from database.company_search import CompanySearch
 
 # Concurrent company lookups. Modest to avoid tripping DDG rate limits —
 # each company fires 2 searches internally.
-POSTED_CUTOFF = datetime(2026, 6, 1)
+POSTED_CUTOFF = datetime(2026, 7, 1)
 
 class GithubInternships:
     TABLE = "internships"
@@ -325,8 +325,14 @@ class GithubInternships:
         except ValueError:
             pass
 
-        current_year = datetime.now().year
-        return datetime.strptime(f"{date_str} {current_year}", "%b %d %Y")
+        # 'Mon DD' has no year. A month later in the calendar than the current
+        # month can't be from this year yet, so it's from last year (e.g. in
+        # July, 'Dec 20' → last December, not this coming December).
+        now = datetime.now()
+        parsed = datetime.strptime(f"{date_str} {now.year}", "%b %d %Y")
+        if parsed.month > now.month:
+            parsed = parsed.replace(year=now.year - 1)
+        return parsed
 
     def insert_issues_internships(self):
         try:

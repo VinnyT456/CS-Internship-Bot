@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 from database.company_search import CompanySearch
 
-POSTED_CUTOFF = datetime(2026, 6, 1)
+POSTED_CUTOFF = datetime(2026, 7, 1)
 
 
 class SimplifyInternships:
