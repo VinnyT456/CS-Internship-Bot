@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import logging
 import logging.handlers
 import os
@@ -21,7 +22,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID"))
 INTERNSHIPS_CHANNEL_ID = int(os.getenv("INTERNSHIPS_CHANNEL_ID"))
-#TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
+TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
 NEW_GRADS_CHANNEL_ID = int(os.getenv("NEW_GRADS_CHANNEL_ID"))
 
 CATEGORY_COLORS = {
@@ -41,8 +42,6 @@ BOT_AVATAR_URL = None
 COMMANDS_SYNCED = False
 
 
-# Append + rotate so restarts don't wipe history; mirror to console so
-# connect/disconnect events are visible in the terminal too.
 log_formatter = logging.Formatter(
     "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 )
@@ -76,7 +75,9 @@ if not logger.handlers:
 intents = discord.Intents.default()
 intents.members = True  # required for on_member_join
 
-bot = commands.Bot(command_prefix="/", intents=intents)
+# max_messages=None disables discord.py's 1000-message cache — the bot only
+# posts, never reads messages back, and Render's instance has 512 MB
+bot = commands.Bot(command_prefix="/", intents=intents, max_messages=None)
 app = FastAPI()
 
 
@@ -95,37 +96,38 @@ def run_web_server():
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
-def fetch_new_internships():
-    github_internships = GithubInternships()
-    supabase_db = SupabaseDatabase()
+# Singletons: creating these per task tick leaks httpx connection pools and
+# re-loads clients every 10-15 minutes — a slow memory creep that eventually
+# OOMs Render's 512 MB instance. One instance each, reused forever.
+_github_internships = None
+_supabase_db = None
 
-    github_internships.insert_internships()
-    return supabase_db.get_unsent_internships()
+
+def get_scraper():
+    global _github_internships
+    if _github_internships is None:
+        _github_internships = GithubInternships()
+    return _github_internships
+
+
+def get_db():
+    global _supabase_db
+    if _supabase_db is None:
+        _supabase_db = SupabaseDatabase()
+    return _supabase_db
+
+
+def fetch_new_internships():
+    get_scraper().insert_internships()
+    return get_db().get_unsent_internships()
 
 
 def mark_internship_as_sent(internship_id):
-    supabase_db = SupabaseDatabase()
-    supabase_db.mark_as_sent(internship_id)
+    get_db().mark_as_sent(internship_id)
 
 
 def update_internship_message_id(internship_id, message_id):
-    supabase_db = SupabaseDatabase()
-    supabase_db.update_internship_message_id(internship_id, message_id)
-
-
-def enrich_company_batch():
-    github_internships = GithubInternships()
-    return github_internships.enrich_companies()
-
-
-def get_sent_message_ids():
-    supabase_db = SupabaseDatabase()
-    return supabase_db.get_sent_message_ids()
-
-
-def reset_internship_discord_state(internship_id):
-    supabase_db = SupabaseDatabase()
-    supabase_db.reset_internship_discord_state(internship_id)
+    get_db().update_internship_message_id(internship_id, message_id)
 
 
 async def get_cached_channel(cache_key, channel_id):
@@ -146,7 +148,7 @@ async def get_cached_channel(cache_key, channel_id):
 async def cache_channels():
     await get_cached_channel("welcome", WELCOME_CHANNEL_ID)
     await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
-    #await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
+    await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
     await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
 
 
@@ -202,8 +204,8 @@ def format_location(location):
 
 
 async def send_internship(internship):
-    #channel = await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
-    channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+    channel = await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
+    #channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
     
     company_info = normalize_company_info(internship.get("company_info"))
 
@@ -350,25 +352,13 @@ async def check_new_internships():
         except Exception:
             logger.exception("Failed sending internship %s", internship_id)
 
+    # Return scrape-cycle allocations (soups, row dicts, HTTP buffers) to
+    # the OS promptly — matters on Render's 512 MB instance
+    gc.collect()
+
 
 @check_new_internships.before_loop
 async def before_check():
-    await bot.wait_until_ready()
-
-
-# 10-minute cadence: cheap no-op when backlog is empty (one DB query),
-# clears a large backlog steadily (max 20 searches per tick) without the
-# hour-long stall the first tick's startup race used to cause.
-@tasks.loop(minutes=10)
-async def enrich_companies_task():
-    try:
-        await asyncio.to_thread(enrich_company_batch)
-    except Exception:
-        logger.exception("Company enrichment batch failed")
-
-
-@enrich_companies_task.before_loop
-async def before_enrich():
     await bot.wait_until_ready()
 
 
@@ -549,72 +539,33 @@ async def testwelcome(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="clearinternships",
-    description="Delete all bot-posted internship messages (uses stored message IDs)",
+    description="Delete all messages in the channel this command is run in",
 )
 @discord.app_commands.default_permissions(administrator=True)
 async def clearinternships(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
+    channel = interaction.channel
+
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.followup.send("Run this command inside a text channel.")
+        return
+
     try:
-        channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
-        rows = await asyncio.to_thread(get_sent_message_ids)
-    except Exception:
-        logger.exception("Failed preparing clearinternships")
-        await interaction.followup.send("Failed to fetch stored message IDs.")
+        # purge() bulk-deletes in chunks of 100 (messages <14 days) and falls
+        # back to individual deletes for older ones — handles everything.
+        deleted = await channel.purge()
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "I need the **Manage Messages** permission in this channel."
+        )
+        return
+    except discord.HTTPException:
+        logger.exception("Failed purging channel %s", channel.id)
+        await interaction.followup.send("Failed to delete messages.")
         return
 
-    if not rows:
-        await interaction.followup.send("No stored message IDs — nothing to delete.")
-        return
-
-    deleted = 0
-    missing = 0
-    failed = 0
-
-    for row in rows:
-        message_id = row["discord_message_id"]
-
-        # Retry transient Discord/network failures (e.g. 503s) so a blip
-        # doesn't leave the message behind
-        removed = False
-
-        for attempt in range(3):
-            try:
-                await channel.get_partial_message(message_id).delete()
-                deleted += 1
-                removed = True
-                break
-            except discord.NotFound:
-                # Already deleted by hand — still reset the row below
-                missing += 1
-                removed = True
-                break
-            except discord.HTTPException as e:
-                logger.warning(
-                    "Delete attempt %d/3 failed for message %s: %s",
-                    attempt + 1,
-                    message_id,
-                    e,
-                )
-                if attempt < 2:
-                    await asyncio.sleep(2)
-
-        if not removed:
-            logger.error("Giving up on message %s after 3 attempts", message_id)
-            failed += 1
-            continue
-
-        # Message confirmed gone: clear the ID and mark unsent so the
-        # internship can be posted again
-        await asyncio.to_thread(reset_internship_discord_state, row["id"])
-
-        # Stay under Discord's rate limit
-        await asyncio.sleep(0.5)
-
-    await interaction.followup.send(
-        f"Deleted {deleted} message(s), {missing} already gone, {failed} failed.\n"
-        "Cleared internships are marked unsent and will re-post on the next cycle."
-    )
+    await interaction.followup.send(f"Deleted {len(deleted)} message(s).")
 
 
 @bot.event
@@ -649,9 +600,6 @@ async def on_ready():
 
     if not check_new_internships.is_running():
         check_new_internships.start()
-
-    if not enrich_companies_task.is_running():
-        enrich_companies_task.start()
 
     logger.info("Bot ready as %s", bot.user)
 
