@@ -348,7 +348,7 @@ class GithubInternships:
                 i
                 for i in internships
                 if datetime.strptime(i["job_posted_at"], "%Y-%m-%d")
-                >= self.POSTED_CUTOFF
+                >= POSTED_CUTOFF
             ]
 
             if not internships:

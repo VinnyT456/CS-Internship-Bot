@@ -38,14 +38,24 @@ class CompanySearch:
     def __init__(self):
         self.logger = logging.getLogger("github_internships")
 
+    # Tried in order; one engine throttling/emptying doesn't kill the search
+    SEARCH_BACKENDS = ("duckduckgo", "bing", "brave")
+
     def _search(self, query, max_results=5):
-        # A fresh DDGS per call keeps this thread-safe for concurrent lookups
-        try:
-            with DDGS() as ddgs:
-                return list(ddgs.text(query, max_results=max_results))
-        except DDGSException as e:
-            self.logger.warning("Search failed for %r: %s", query, e)
-            return []
+        # A fresh DDGS per call keeps this thread-safe for concurrent lookups.
+        # Fall through backends so a throttled/empty engine doesn't return NULL.
+        for backend in self.SEARCH_BACKENDS:
+            try:
+                with DDGS() as ddgs:
+                    results = list(
+                        ddgs.text(query, max_results=max_results, backend=backend)
+                    )
+                if results:
+                    return results
+            except DDGSException as e:
+                self.logger.warning("%s search failed for %r: %s", backend, query, e)
+
+        return []
 
     @staticmethod
     def _careers_url(company):
@@ -114,12 +124,30 @@ class CompanySearch:
         return domain
 
     def _find_domain(self, company):
+        core = re.sub(r"[^a-z0-9]", "", company.lower())
+
+        candidates = []
         for result in self._search(f'{company} official website'):
             url = result.get("href") or ""
             domain = urlparse(url).netloc.lower().replace("www.", "")
-            if domain and not any(bad in domain for bad in self.BAD_DOMAINS):
-                return self._root_domain(domain)
-        return None
+            if not domain or any(bad in domain for bad in self.BAD_DOMAINS):
+                continue
+            root = self._root_domain(domain)
+            if root not in candidates:
+                candidates.append(root)
+
+        if not candidates:
+            return None
+
+        # Prefer a domain whose name overlaps the company's — 'jpmorganchase'
+        # for 'JPMorgan Chase' beats the top-ranked but unrelated 'chase.com'
+        for cand in candidates:
+            root_name = self._root_domain(cand).split(".")[0]
+            if core and (root_name in core or core in root_name):
+                return cand
+
+        # No name overlap — trust the top result
+        return candidates[0]
 
     @staticmethod
     def _logo(domain):
