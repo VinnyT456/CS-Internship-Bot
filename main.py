@@ -610,7 +610,7 @@ async def clearinternships(interaction: discord.Interaction):
     try:
         # purge() bulk-deletes in chunks of 100 (messages <14 days) and falls
         # back to individual deletes for older ones — handles everything.
-        deleted = await channel.purge()
+        deleted = await channel.purge(limit=None)
     except discord.Forbidden:
         await interaction.followup.send(
             "I need the **Manage Messages** permission in this channel."
