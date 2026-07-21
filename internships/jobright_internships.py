@@ -8,11 +8,9 @@ import markdown
 from database.database import SupabaseDatabase
 from datetime import datetime
 from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor
 
 from database.company_search import CompanySearch
 
-COMPANY_LOOKUP_CONCURRENCY = 5
 POSTED_CUTOFF = datetime(2026, 6, 1)
 
 
@@ -232,8 +230,7 @@ class JobrightInternships:
             name, domain = item
             return self.company_search.get_company_info(name, known_domain=domain)
 
-        with ThreadPoolExecutor(max_workers=COMPANY_LOOKUP_CONCURRENCY) as pool:
-            return list(pool.map(lookup, domains.items()))
+        return [lookup(item) for item in domains.items()]
 
     # ------------------------------------------------------------------ #
     # Orchestration

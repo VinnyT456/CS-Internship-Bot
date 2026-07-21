@@ -1,6 +1,5 @@
 import asyncio
 import gc
-from concurrent.futures import ThreadPoolExecutor
 import logging
 import logging.handlers
 import os
@@ -139,12 +138,13 @@ NEW_GRAD_SCRAPERS = (GithubNewGrad, JobrightNewGrad, SimplifyNewGrad)
 
 
 def _scrape_all(scraper_classes):
-    scrapers = [_get(cls) for cls in scraper_classes]
-
-    # Run repos concurrently — each is network-bound (GitHub + company
-    # searches), so they overlap instead of running back-to-back
-    with ThreadPoolExecutor(max_workers=len(scrapers)) as pool:
-        list(pool.map(_run_scraper, scrapers))
+    # Sequential, not concurrent: each repo's README soup balloons to ~25 MB
+    # during parsing. Running them back-to-back keeps only one soup alive at
+    # a time and frees it (gc) before the next — running all three at once
+    # tripled the peak and OOM'd Render's 512 MB instance.
+    for cls in scraper_classes:
+        _run_scraper(_get(cls))
+        gc.collect()
 
 
 def fetch_new_internships():
@@ -413,6 +413,9 @@ async def check_new_grads():
 @check_new_grads.before_loop
 async def before_new_grad_check():
     await bot.wait_until_ready()
+    # Offset from the internship loop so the two scrape batches never run
+    # (and hold their README soups) at the same time.
+    await asyncio.sleep(90)
 
 
 # Silver Wolf sees the universe as one big immersive sim — internship

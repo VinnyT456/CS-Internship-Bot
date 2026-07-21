@@ -8,11 +8,9 @@ import markdown
 import re
 from database.database import SupabaseDatabase
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
 
 from database.company_search import CompanySearch
 
-COMPANY_LOOKUP_CONCURRENCY = 5
 POSTED_CUTOFF = datetime(2026, 6, 1)
 
 
@@ -201,8 +199,8 @@ class SimplifyInternships:
         if not new_names:
             return []
 
-        with ThreadPoolExecutor(max_workers=COMPANY_LOOKUP_CONCURRENCY) as pool:
-            return list(pool.map(self.company_search.get_company_info, new_names))
+        # Offline & instant now — plain loop, no thread pool needed
+        return [self.company_search.get_company_info(name) for name in new_names]
 
     def get_internships(self):
         try:
