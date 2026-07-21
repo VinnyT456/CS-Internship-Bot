@@ -23,6 +23,7 @@ class CompanySearch:
         "bloomberg.com",
         "instagram.com",
         "github.com",
+        "github.io",
         "medium.com",
         "greenhouse.io",
         "lever.co",
@@ -32,7 +33,8 @@ class CompanySearch:
         "simplify.jobs",
         "ziprecruiter.com",
         "levels.fyi",
-        "google.com",
+        # NOTE: google.com deliberately NOT blocked — it's a real company
+        # domain. Google *search-result* links are filtered by path elsewhere.
     )
 
     def __init__(self):
@@ -123,31 +125,57 @@ class CompanySearch:
             return ".".join(parts[-2:])
         return domain
 
+    def _is_bad_domain(self, domain):
+        # Match on the root domain, not a substring — 'netflix.com' must not
+        # be rejected because it ends in 'x.com'
+        root = self._root_domain(domain)
+        return root in self.BAD_DOMAINS
+
     def _find_domain(self, company):
         core = re.sub(r"[^a-z0-9]", "", company.lower())
 
         candidates = []
         for result in self._search(f'{company} official website'):
             url = result.get("href") or ""
-            domain = urlparse(url).netloc.lower().replace("www.", "")
-            if not domain or any(bad in domain for bad in self.BAD_DOMAINS):
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower().replace("www.", "")
+
+            if not domain or self._is_bad_domain(domain):
                 continue
+
+            # A google.com/search... link is a search result, not the
+            # company's site — only accept google.com as a bare homepage
+            if "google.com" in domain and parsed.path.rstrip("/") not in ("", "/"):
+                continue
+
             root = self._root_domain(domain)
             if root not in candidates:
                 candidates.append(root)
 
-        if not candidates:
+        if not candidates or not core:
             return None
 
-        # Prefer a domain whose name overlaps the company's — 'jpmorganchase'
-        # for 'JPMorgan Chase' beats the top-ranked but unrelated 'chase.com'
-        for cand in candidates:
-            root_name = self._root_domain(cand).split(".")[0]
-            if core and (root_name in core or core in root_name):
-                return cand
+        # Rank by how well the domain's name matches the company's. Substring
+        # overlap ('jpmorganchase' ⊇ 'chase') scores highest; otherwise fall
+        # back to fuzzy ratio. This rejects junk like 'linktr.ee' or
+        # 'computerhope.com' that rank high but share no name with the company.
+        def score(cand):
+            root_name = cand.split(".")[0]
+            if root_name in core or core in root_name:
+                return 1.0
+            return SequenceMatcher(None, core, root_name).ratio()
 
-        # No name overlap — trust the top result
-        return candidates[0]
+        best = max(candidates, key=score)
+
+        # Below this, the "match" is coincidental — better no logo than a
+        # wrong one (the website field still links to a Google careers search)
+        if score(best) < 0.5:
+            self.logger.info(
+                "No confident domain for %s (best: %s)", company, best
+            )
+            return None
+
+        return best
 
     @staticmethod
     def _logo(domain):
@@ -155,13 +183,19 @@ class CompanySearch:
             return None
         return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
 
-    def get_company_info(self, company):
-        # Run the two independent searches concurrently — halves latency
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            domain_future = pool.submit(self._find_domain, company)
-            linkedin_future = pool.submit(self._find_linkedin, company)
-            domain = domain_future.result()
-            linkedin = linkedin_future.result()
+    def get_company_info(self, company, known_domain=None):
+        # If the source already gives the company's site (e.g. jobright's
+        # README links it), skip the domain search entirely.
+        if known_domain:
+            domain = self._root_domain(known_domain.lower().replace("www.", ""))
+            linkedin = self._find_linkedin(company)
+        else:
+            # Run the two independent searches concurrently — halves latency
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                domain_future = pool.submit(self._find_domain, company)
+                linkedin_future = pool.submit(self._find_linkedin, company)
+                domain = domain_future.result()
+                linkedin = linkedin_future.result()
 
         return {
             "company_name": company,

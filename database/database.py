@@ -2,7 +2,6 @@ import os
 import logging
 from dotenv import load_dotenv
 from supabase import create_client
-from pprint import pprint
 
 
 class SupabaseDatabase:
@@ -28,12 +27,14 @@ class SupabaseDatabase:
         )
 
         self.internships_table = "internships"
+        self.new_grads_table = "new_grads"
         self.companies_table = "company_info"
         self.repo_table = "repo_info"
 
-    def insert_internships(self, internships):
+    def insert_internships(self, internships, table=None):
+        table = table or self.internships_table
         try:
-            existing = self.get_existing_internships()
+            existing = self.get_existing_internships(table)
             existing_keys = {
                 (item["company_name"], item["job_title"], item["job_url"])
                 for item in existing
@@ -51,26 +52,27 @@ class SupabaseDatabase:
             ]
 
             self.logger.info(
-                "Found %d new internships out of %d scraped",
+                "Found %d new rows out of %d scraped for %s",
                 len(new_internships),
                 len(internships),
+                table,
             )
 
             if not new_internships:
-                self.logger.info("No new internships to insert")
+                self.logger.info("No new rows to insert into %s", table)
                 return []
 
             response = (
-                self.supabase.table(self.internships_table)
+                self.supabase.table(table)
                 .insert(new_internships)
                 .execute()
             )
 
-            self.logger.info("Inserted %d new internships", len(response.data))
+            self.logger.info("Inserted %d new rows into %s", len(response.data), table)
 
             return response.data
         except Exception:
-            self.logger.exception("Failed inserting internships")
+            self.logger.exception("Failed inserting into %s", table)
             return None
 
     def insert_companies(self, companies):
@@ -95,31 +97,11 @@ class SupabaseDatabase:
             self.logger.exception("Failed inserting companies")
             return None
 
-    def get_all_internships(self):
-        try:
-            self.logger.info("Fetching internships")
-
-            response = (
-                self.supabase.table(self.internships_table)
-                .select("*")
-                .order("id", desc=False)
-                .execute()
-            )
-
-            self.logger.debug("Supabase returned %d row(s)", len(response.data))
-
-            self.logger.info("Found %d internships", len(response.data))
-
-            return response.data
-
-        except Exception:
-            self.logger.exception("Failed to fetch internships")
-            return None
-
-    def get_unsent_internships(self):
+    def get_unsent_internships(self, table=None):
+        table = table or self.internships_table
         try:
             response = (
-                self.supabase.table(self.internships_table)
+                self.supabase.table(table)
                 .select("""
                     *,
                     company_info(*)
@@ -129,64 +111,20 @@ class SupabaseDatabase:
                 .execute()
             )
 
-            self.logger.debug("Supabase returned %d unsent row(s)", len(response.data))
-
-            self.logger.info("Found %d unsent internships", len(response.data))
+            self.logger.info(
+                "Found %d unsent rows in %s", len(response.data), table
+            )
 
             return response.data
         except Exception:
-            self.logger.exception("Failed to fetch unsent internships")
-            return None
-        return response.data
-
-    def delete_internship(self, internship_id):
-        try:
-            self.logger.info("Deleting internship %s", internship_id)
-
-            response = (
-                self.supabase.table(self.internships_table)
-                .delete()
-                .eq("id", internship_id)
-                .execute()
-            )
-
-            self.logger.debug("Supabase returned %d row(s)", len(response.data))
-
-            self.logger.info("Internship deleted successfully")
-
-            return response.data
-
-        except Exception:
-            self.logger.exception("Failed to delete internship")
+            self.logger.exception("Failed to fetch unsent rows from %s", table)
             return None
 
-    def find_internship(self, query: str):
-        try:
-            self.logger.info("Searching internships for: %s", query)
-
-            response = (
-                self.supabase.table(self.internships_table)
-                .select("*")
-                .or_(f"company_name.ilike.%{query}%,job_title.ilike.%{query}%")
-                .execute()
-            )
-
-            self.logger.debug(
-                "Supabase returned %d matching row(s)", len(response.data)
-            )
-
-            self.logger.info("Found %d matching internships", len(response.data))
-
-            return response.data
-
-        except Exception:
-            self.logger.exception("Failed to search internships")
-            return None
-
-    def get_existing_internships(self):
+    def get_existing_internships(self, table=None):
+        table = table or self.internships_table
         try:
             response = (
-                self.supabase.table(self.internships_table)
+                self.supabase.table(table)
                 .select("company_name,job_title,job_url")
                 .execute()
             )
@@ -194,7 +132,7 @@ class SupabaseDatabase:
             return response.data
 
         except Exception:
-            self.logger.exception("Failed fetching existing internships")
+            self.logger.exception("Failed fetching existing rows from %s", table)
             return []
 
     def get_repo_update_time(self, repo_name):
@@ -247,9 +185,10 @@ class SupabaseDatabase:
             self.logger.exception("Failed fetching existing company names")
             return []
 
-    def mark_as_sent(self, internship_id):
+    def mark_as_sent(self, internship_id, table=None):
+        table = table or self.internships_table
         (
-            self.supabase.table(self.internships_table)
+            self.supabase.table(table)
             .update({"sent_to_discord": True})
             .eq("id", internship_id)
             .execute()
@@ -277,23 +216,25 @@ class SupabaseDatabase:
             self.logger.exception("Failed updating repo last updated time")
             return
 
-    def update_internship_message_id(self, internship_id, message_id):
+    def update_internship_message_id(self, internship_id, message_id, table=None):
+        table = table or self.internships_table
         try:
             response = (
-                self.supabase.table(self.internships_table)
-                .update(
-                    {
-                        "discord_message_id": message_id
-                    }
-                )
+                self.supabase.table(table)
+                .update({"discord_message_id": message_id})
                 .eq("id", internship_id)
                 .execute()
             )
-            self.logger.info("Updated internship %s message ID to %s", internship_id, message_id)
+            self.logger.info(
+                "Updated %s %s message ID to %s", table, internship_id, message_id
+            )
             return response.data
         except Exception:
-            self.logger.exception("Failed updating internship %s message ID to %s", internship_id, message_id)
+            self.logger.exception(
+                "Failed updating %s %s message ID", table, internship_id
+            )
             return None
+
 
 if __name__ == "__main__":
     database = SupabaseDatabase()

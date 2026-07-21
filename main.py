@@ -1,5 +1,6 @@
 import asyncio
 import gc
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import logging.handlers
 import os
@@ -13,8 +14,13 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from database import SupabaseDatabase
-from github_internships import GithubInternships
+from database.database import SupabaseDatabase
+from internships.github_internships import GithubInternships
+from internships.jobright_internships import JobrightInternships
+from internships.simplify_internships import SimplifyInternships
+from new_grads.github_new_grad import GithubNewGrad
+from new_grads.jobright_new_grad import JobrightNewGrad
+from new_grads.simplify_new_grad import SimplifyNewGrad
 
 
 load_dotenv()
@@ -99,15 +105,18 @@ def run_web_server():
 # Singletons: creating these per task tick leaks httpx connection pools and
 # re-loads clients every 10-15 minutes — a slow memory creep that eventually
 # OOMs Render's 512 MB instance. One instance each, reused forever.
-_github_internships = None
+# Singletons: creating these per task tick leaks httpx connection pools and
+# re-loads clients every 10-15 minutes — a slow memory creep that eventually
+# OOMs Render's 512 MB instance. One instance each, reused forever.
+_scrapers = {}
 _supabase_db = None
 
 
-def get_scraper():
-    global _github_internships
-    if _github_internships is None:
-        _github_internships = GithubInternships()
-    return _github_internships
+def _get(cls):
+    inst = _scrapers.get(cls)
+    if inst is None:
+        inst = _scrapers[cls] = cls()
+    return inst
 
 
 def get_db():
@@ -117,17 +126,43 @@ def get_db():
     return _supabase_db
 
 
+def _run_scraper(scraper):
+    # Isolated so one repo failing doesn't sink the others
+    try:
+        scraper.insert_internships()
+    except Exception:
+        logger.exception("Scraper %s failed", scraper.__class__.__name__)
+
+
+INTERNSHIP_SCRAPERS = (GithubInternships, JobrightInternships, SimplifyInternships)
+NEW_GRAD_SCRAPERS = (GithubNewGrad, JobrightNewGrad, SimplifyNewGrad)
+
+
+def _scrape_all(scraper_classes):
+    scrapers = [_get(cls) for cls in scraper_classes]
+
+    # Run repos concurrently — each is network-bound (GitHub + company
+    # searches), so they overlap instead of running back-to-back
+    with ThreadPoolExecutor(max_workers=len(scrapers)) as pool:
+        list(pool.map(_run_scraper, scrapers))
+
+
 def fetch_new_internships():
-    get_scraper().insert_internships()
-    return get_db().get_unsent_internships()
+    _scrape_all(INTERNSHIP_SCRAPERS)
+    return get_db().get_unsent_internships("internships") or []
 
 
-def mark_internship_as_sent(internship_id):
-    get_db().mark_as_sent(internship_id)
+def fetch_new_grads():
+    _scrape_all(NEW_GRAD_SCRAPERS)
+    return get_db().get_unsent_internships("new_grads") or []
 
 
-def update_internship_message_id(internship_id, message_id):
-    get_db().update_internship_message_id(internship_id, message_id)
+def mark_internship_as_sent(internship_id, table):
+    get_db().mark_as_sent(internship_id, table)
+
+
+def update_internship_message_id(internship_id, message_id, table):
+    get_db().update_internship_message_id(internship_id, message_id, table)
 
 
 async def get_cached_channel(cache_key, channel_id):
@@ -203,10 +238,7 @@ def format_location(location):
     return truncate_embed_value(location_formatted)
 
 
-async def send_internship(internship):
-    #channel = await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
-    channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
-    
+async def send_internship(internship, channel, table):
     company_info = normalize_company_info(internship.get("company_info"))
 
     company = company_info.get("company_name") or internship.get("company_name") or "Unknown"
@@ -214,7 +246,6 @@ async def send_internship(internship):
     company_linkedin = company_info.get("company_linkedin")
     company_logo = company_info.get("company_logo")
 
-    internship_id = internship["id"]
     title = internship.get("job_title") or "Untitled Internship"
     location = internship.get("job_location") or "Unknown"
     category = internship.get("job_type") or "Other"
@@ -312,45 +343,48 @@ async def send_internship(internship):
     message = await channel.send(embed=embed)
 
     await asyncio.to_thread(
-        update_internship_message_id,
-        internship_id,
-        message.id,
+        update_internship_message_id, internship["id"], message.id, table
     )
 
 
-@tasks.loop(minutes=15)
-async def check_new_internships():
-    try:
-        internships = await asyncio.to_thread(fetch_new_internships)
-    except Exception:
-        logger.exception("Failed fetching internships")
-        return
+async def _post_batch(rows, channel, kind, table):
+    logger.info("Found %s unsent %s", len(rows), kind)
 
-    logger.info("Found %s unsent internships", len(internships))
-
-    for internship in internships:
+    for internship in rows:
         internship_id = internship.get("id", "unknown")
 
         try:
-            await send_internship(internship)
+            await send_internship(internship, channel, table)
 
             await asyncio.to_thread(
-                mark_internship_as_sent,
-                internship["id"],
+                mark_internship_as_sent, internship["id"], table
             )
 
             await asyncio.sleep(MESSAGE_SEND_DELAY_SECONDS)
 
         except discord.HTTPException as exc:
             logger.exception(
-                "Discord API error while sending internship %s: %s",
+                "Discord API error while sending %s %s: %s",
+                kind,
                 internship_id,
                 exc,
             )
             await asyncio.sleep(10)
 
         except Exception:
-            logger.exception("Failed sending internship %s", internship_id)
+            logger.exception("Failed sending %s %s", kind, internship_id)
+
+
+@tasks.loop(minutes=15)
+async def check_new_internships():
+    try:
+        rows = await asyncio.to_thread(fetch_new_internships)
+    except Exception:
+        logger.exception("Failed fetching internships")
+        return
+
+    channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+    await _post_batch(rows, channel, "internships", "internships")
 
     # Return scrape-cycle allocations (soups, row dicts, HTTP buffers) to
     # the OS promptly — matters on Render's 512 MB instance
@@ -359,6 +393,25 @@ async def check_new_internships():
 
 @check_new_internships.before_loop
 async def before_check():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=15)
+async def check_new_grads():
+    try:
+        rows = await asyncio.to_thread(fetch_new_grads)
+    except Exception:
+        logger.exception("Failed fetching new grads")
+        return
+
+    channel = await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
+    await _post_batch(rows, channel, "new grads", "new_grads")
+
+    gc.collect()
+
+
+@check_new_grads.before_loop
+async def before_new_grad_check():
     await bot.wait_until_ready()
 
 
@@ -600,6 +653,9 @@ async def on_ready():
 
     if not check_new_internships.is_running():
         check_new_internships.start()
+
+    if not check_new_grads.is_running():
+        check_new_grads.start()
 
     logger.info("Bot ready as %s", bot.user)
 

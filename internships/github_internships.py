@@ -6,11 +6,11 @@ from bs4 import BeautifulSoup
 import emoji
 import logging
 import markdown
-from database import SupabaseDatabase
+from database.database import SupabaseDatabase
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-from company_search import CompanySearch
+from database.company_search import CompanySearch
 
 # Concurrent company lookups. Modest to avoid tripping DDG rate limits —
 # each company fires 2 searches internally.
@@ -18,6 +18,8 @@ COMPANY_LOOKUP_CONCURRENCY = 5
 POSTED_CUTOFF = datetime(2026, 6, 1)
 
 class GithubInternships:
+    TABLE = "internships"
+
     def __init__(self):
         load_dotenv()
 
@@ -175,9 +177,6 @@ class GithubInternships:
         except Exception:
             self.logger.exception("Failed parsing README table")
             raise
-
-    def get_markdown(self, readme):
-        return self.markdown.render(readme)
 
     def get_repo(self, repo_name):
         self.logger.info("Fetching repository: %s", repo_name)
@@ -357,7 +356,7 @@ class GithubInternships:
 
             companies = self.build_company_info(internships)
             self.supabase_db.insert_companies(companies)
-            return self.supabase_db.insert_internships(internships)
+            return self.supabase_db.insert_internships(internships, self.TABLE)
 
         except Exception:
             self.logger.exception("Failed inserting issue internships")
@@ -380,7 +379,7 @@ class GithubInternships:
                 self.supabase_db.insert_repo_update_time(
                     full_repo_name, current_commit_time
                 )
-                self.supabase_db.insert_internships(internships)
+                self.supabase_db.insert_internships(internships, self.TABLE)
             else:
                 self.logger.info("No new commits found in repo %s", repo_name)
 
