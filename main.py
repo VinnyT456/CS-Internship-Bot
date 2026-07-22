@@ -240,7 +240,7 @@ def format_location(location):
     return truncate_embed_value(location_formatted)
 
 
-async def send_internship(internship, channel, table):
+async def send_internship(internship, channel, table, type="internship"):
     company_info = normalize_company_info(internship.get("company_info"))
 
     company = company_info.get("company_name") or internship.get("company_name") or "Unknown"
@@ -295,7 +295,7 @@ async def send_internship(internship, channel, table):
 
     embed.add_field(
         name="💼 Type",
-        value="```Internship```",
+        value=f"```{type}```",
         inline=True,
     )
 
@@ -356,7 +356,7 @@ async def _post_batch(rows, channel, kind, table):
         internship_id = internship.get("id", "unknown")
 
         try:
-            await send_internship(internship, channel, table)
+            await send_internship(internship, channel, table, kind)
 
             await asyncio.to_thread(
                 mark_internship_as_sent, internship["id"], table
@@ -408,7 +408,7 @@ async def check_new_internships():
 @check_new_internships.before_loop
 async def before_check():
     await bot.wait_until_ready()
-    logger.info("Waiting to start internship check")
+    logger.info("Waiting to start new grads check")
 
 @tasks.loop(minutes=15)
 async def check_new_grads():
