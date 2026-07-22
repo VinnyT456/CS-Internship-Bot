@@ -6,6 +6,8 @@ import os
 import random
 import threading
 from urllib.parse import quote
+import time
+from datetime import datetime
 
 import discord
 import uvicorn
@@ -377,42 +379,68 @@ async def _post_batch(rows, channel, kind, table):
 
 @tasks.loop(minutes=15)
 async def check_new_internships():
+    start = time.perf_counter()
+
+    logger.info("=" * 60)
+    logger.info("🔍 Starting internship scrape")
+    logger.info("Time (UTC): %s", datetime.utcnow().isoformat())
+
     try:
         rows = await asyncio.to_thread(fetch_new_internships)
+
+        logger.info("Fetched %d new internship(s)", len(rows))
+
     except Exception:
-        logger.exception("Failed fetching internships")
+        logger.exception("❌ Failed fetching internships")
         return
 
     channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
+
     await _post_batch(rows, channel, "internships", "internships")
 
-    # Return scrape-cycle allocations (soups, row dicts, HTTP buffers) to
-    # the OS promptly — matters on Render's 512 MB instance
+    elapsed = time.perf_counter() - start
+    logger.info("✅ Scrape completed in %.2f seconds", elapsed)
+
+    # Return scrape-cycle allocations
     gc.collect()
 
 
 @check_new_internships.before_loop
 async def before_check():
     await bot.wait_until_ready()
-
+    logger.info("Waiting to start internship check")
 
 @tasks.loop(minutes=15)
 async def check_new_grads():
+    start = time.perf_counter()
+
+    logger.info("=" * 60)
+    logger.info("🔍 Starting internship scrape")
+    logger.info("Time (UTC): %s", datetime.utcnow().isoformat())
+
     try:
         rows = await asyncio.to_thread(fetch_new_grads)
+
+        logger.info("Fetched %d new grad(s)", len(rows))
+
     except Exception:
-        logger.exception("Failed fetching new grads")
+        logger.exception("❌ Failed fetching new grads")
         return
 
     channel = await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
-    await _post_batch(rows, channel, "new grads", "new_grads")
 
+    await _post_batch(rows, channel, "new_grads", "new_grads")
+
+    elapsed = time.perf_counter() - start
+    logger.info("✅ Scrape completed in %.2f seconds", elapsed)
+
+    # Return scrape-cycle allocations
     gc.collect()
-
 
 @check_new_grads.before_loop
 async def before_new_grad_check():
     await bot.wait_until_ready()
+    logger.info("Waiting to start new grads check")
     # Offset from the internship loop so the two scrape batches never run
     # (and hold their README soups) at the same time.
     await asyncio.sleep(90)
