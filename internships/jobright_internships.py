@@ -170,8 +170,15 @@ class JobrightInternships:
             return datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
             pass
-        current_year = datetime.now().year
-        return datetime.strptime(f"{date_str} {current_year}", "%b %d %Y")
+
+        # 'Mon DD' has no year. A month later in the calendar than the current
+        # month can't be from this year yet, so it's from last year (e.g. in
+        # July, 'Dec 20' → last December, not this coming December).
+        now = datetime.now()
+        parsed = datetime.strptime(f"{date_str} {now.year}", "%b %d %Y")
+        if parsed.month > now.month:
+            parsed = parsed.replace(year=now.year - 1)
+        return parsed
 
     def classify_role(self, title):
         title = title.lower()
@@ -263,19 +270,18 @@ class JobrightInternships:
 
     def insert_internships(self):
         full_repo_name = f"https://github.com/{self.REPO}"
-        current_commit_time = self.get_repo().pushed_at.strftime("%Y-%m-%d %H:%M:%S")
-        last_commit_time = self.supabase_db.get_repo_update_time(full_repo_name)
+        pushed_at = self.get_repo().pushed_at
 
-        if last_commit_time is not None and current_commit_time <= last_commit_time:
+        if not self.supabase_db.repo_has_new_commits(full_repo_name, pushed_at):
             self.logger.info("No new commits found in repo %s", self.REPO)
             return
 
         self.logger.info("New commits found in repo %s", self.REPO)
         internships, companies = self.get_internships()
 
-        self.supabase_db.insert_companies(companies)
-        self.supabase_db.insert_repo_update_time(full_repo_name, current_commit_time)
-        self.supabase_db.insert_internships(internships, self.TABLE)
+        self.supabase_db.commit_scrape(
+            full_repo_name, pushed_at, internships, companies, self.TABLE
+        )
 
 
 if __name__ == "__main__":

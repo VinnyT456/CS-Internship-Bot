@@ -30,20 +30,15 @@ class GithubNewGrad(GithubInternships):
         for repo_name in self.repos:
             self.current_repo_name = repo_name
             full_repo_name = f"https://github.com/{repo_name}"
-            current_commit_time = self.get_repo(repo_name).pushed_at.strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            last_commit_time = self.supabase_db.get_repo_update_time(full_repo_name)
+            pushed_at = self.get_repo(repo_name).pushed_at
 
-            if last_commit_time is None or current_commit_time > last_commit_time:
+            if self.supabase_db.repo_has_new_commits(full_repo_name, pushed_at):
                 self.logger.info("New commits found in repo %s", repo_name)
                 internships, companies = self.get_internships(repo_name)
 
-                self.supabase_db.insert_companies(companies)
-                self.supabase_db.insert_repo_update_time(
-                    full_repo_name, current_commit_time
+                self.supabase_db.commit_scrape(
+                    full_repo_name, pushed_at, internships, companies, self.TABLE
                 )
-                self.supabase_db.insert_internships(internships, self.TABLE)
             else:
                 self.logger.info("No new commits found in repo %s", repo_name)
         # No issues flow — this repo has no submission issues

@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -34,6 +35,13 @@ class SupabaseDatabase:
     def insert_internships(self, internships, table=None):
         table = table or self.internships_table
         try:
+            # Drop any internal helper fields (leading underscore) that would
+            # be rejected as non-existent columns by Supabase.
+            internships = [
+                {k: v for k, v in row.items() if not k.startswith("_")}
+                for row in internships
+            ]
+
             existing = self.get_existing_internships(table)
             existing_keys = {
                 (item["company_name"], item["job_title"], item["job_url"])
@@ -150,6 +158,60 @@ class SupabaseDatabase:
         except Exception:
             self.logger.exception("Failed fetching repo last updated time")
             return None
+
+    @staticmethod
+    def _to_utc(value):
+        """Parse a stored ISO string or a datetime into a tz-aware UTC
+        datetime, so comparisons don't depend on string formatting."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            # Supabase returns e.g. '2026-07-23T00:36:04+00:00'
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def repo_has_new_commits(self, repo_name, pushed_at):
+        """True if the repo's latest push is newer than what we last stored.
+        Compares real datetimes (GitHub pushed_at vs stored value) rather
+        than formatted strings, which sorted incorrectly."""
+        stored = self.get_repo_update_time(repo_name)
+        if stored is None:
+            return True
+        return self._to_utc(pushed_at) > self._to_utc(stored)
+
+    def commit_scrape(self, repo_name, pushed_at, internships, companies, table):
+        """Persist a scrape atomically-ish, in FK-safe order:
+        1. upsert companies (internships FK-reference them)
+        2. insert the internship/new-grad rows
+        3. advance the repo's stored commit time ONLY if both succeeded, so a
+           failed insert is retried next cycle instead of being skipped as
+           'no new commits'.
+        Returns True if the commit time was advanced."""
+        # Companies must land first — the rows FK-reference company_info.
+        # insert_companies returns None on failure; bail so we don't insert
+        # internships that would trip the foreign key.
+        if companies:
+            if self.insert_companies(companies) is None:
+                self.logger.error(
+                    "Company upsert failed for %s — skipping row insert, "
+                    "will retry next cycle",
+                    repo_name,
+                )
+                return False
+
+        if internships:
+            if self.insert_internships(internships, table) is None:
+                self.logger.error(
+                    "Row insert failed for %s — not advancing commit time, "
+                    "will retry next cycle",
+                    repo_name,
+                )
+                return False
+
+        self.insert_repo_update_time(repo_name, pushed_at.isoformat())
+        return True
 
     def get_company_info(self, company_name):
         try:

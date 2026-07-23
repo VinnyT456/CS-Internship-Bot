@@ -128,6 +128,9 @@ class SimplifyInternships:
                 try:
                     posted_dt = self._relative_age_to_date(age)
                 except ValueError:
+                    # Unrecognized age unit — log so a format change surfaces
+                    # instead of silently dropping every row
+                    self.logger.warning("Skipping row with unparseable age: %r", age)
                     continue
                 if posted_dt < POSTED_CUTOFF:
                     continue
@@ -225,19 +228,18 @@ class SimplifyInternships:
 
     def insert_internships(self):
         full_repo_name = f"https://github.com/{self.repo_name}"
-        current_commit_time = self.get_repo().pushed_at.strftime("%Y-%m-%d %H:%M:%S")
-        last_commit_time = self.supabase_db.get_repo_update_time(full_repo_name)
+        pushed_at = self.get_repo().pushed_at
 
-        if last_commit_time is not None and current_commit_time <= last_commit_time:
+        if not self.supabase_db.repo_has_new_commits(full_repo_name, pushed_at):
             self.logger.info("No new commits found in repo %s", self.repo_name)
             return
 
         self.logger.info("New commits found in repo %s", self.repo_name)
         internships, companies = self.get_internships()
 
-        self.supabase_db.insert_companies(companies)
-        self.supabase_db.insert_repo_update_time(full_repo_name, current_commit_time)
-        self.supabase_db.insert_internships(internships, self.TABLE)
+        self.supabase_db.commit_scrape(
+            full_repo_name, pushed_at, internships, companies, self.TABLE
+        )
 
 
 if __name__ == "__main__":

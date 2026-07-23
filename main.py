@@ -7,7 +7,7 @@ import random
 import threading
 from urllib.parse import quote
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import discord
 import uvicorn
@@ -42,6 +42,11 @@ CATEGORY_COLORS = {
 }
 
 MESSAGE_SEND_DELAY_SECONDS = 1.2
+# Cap posts per 15-min cycle so a first run against a full table (hundreds of
+# rows) can't post for longer than the loop interval and overlap the next tick.
+# ~1.2s/post × 400 ≈ 8 min, comfortably under 15. Remaining rows stay unsent
+# and carry to the next cycle.
+MAX_POSTS_PER_CYCLE = 400
 
 CHANNEL_CACHE = {}
 SEARCH_URL_CACHE = {}
@@ -103,9 +108,6 @@ def run_web_server():
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
-# Singletons: creating these per task tick leaks httpx connection pools and
-# re-loads clients every 10-15 minutes — a slow memory creep that eventually
-# OOMs Render's 512 MB instance. One instance each, reused forever.
 # Singletons: creating these per task tick leaks httpx connection pools and
 # re-loads clients every 10-15 minutes — a slow memory creep that eventually
 # OOMs Render's 512 MB instance. One instance each, reused forever.
@@ -352,6 +354,13 @@ async def send_internship(internship, channel, table, type="internship"):
 async def _post_batch(rows, channel, kind, table):
     logger.info("Found %s unsent %s", len(rows), kind)
 
+    if len(rows) > MAX_POSTS_PER_CYCLE:
+        logger.info(
+            "Capping this cycle to %d of %d %s; the rest post next cycle",
+            MAX_POSTS_PER_CYCLE, len(rows), kind,
+        )
+        rows = rows[:MAX_POSTS_PER_CYCLE]
+
     for internship in rows:
         internship_id = internship.get("id", "unknown")
 
@@ -383,7 +392,7 @@ async def check_new_internships():
 
     logger.info("=" * 60)
     logger.info("🔍 Starting internship scrape")
-    logger.info("Time (UTC): %s", datetime.utcnow().isoformat())
+    logger.info("Time (UTC): %s", datetime.now(timezone.utc).isoformat())
 
     try:
         rows = await asyncio.to_thread(fetch_new_internships)
@@ -408,15 +417,15 @@ async def check_new_internships():
 @check_new_internships.before_loop
 async def before_check():
     await bot.wait_until_ready()
-    logger.info("Waiting to start new grads check")
+    logger.info("Waiting to start internship check")
 
 @tasks.loop(minutes=15)
 async def check_new_grads():
     start = time.perf_counter()
 
     logger.info("=" * 60)
-    logger.info("🔍 Starting internship scrape")
-    logger.info("Time (UTC): %s", datetime.utcnow().isoformat())
+    logger.info("🔍 Starting new grad scrape")
+    logger.info("Time (UTC): %s", datetime.now(timezone.utc).isoformat())
 
     try:
         rows = await asyncio.to_thread(fetch_new_grads)
