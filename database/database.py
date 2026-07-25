@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -32,6 +33,54 @@ class SupabaseDatabase:
         self.companies_table = "company_info"
         self.repo_table = "repo_info"
 
+    @staticmethod
+    def _normalize_title(title):
+        """Collapse the variants aggregators put on the same role so they
+        dedup to one key: strip trailing parentheticals/brackets ('(Fall
+        2026)', '[Remote]'), unify dash characters, drop a trailing 'Team NN',
+        and squeeze whitespace. Only trailing (…) is removed — a leading or
+        mid-title paren is kept, so 'Intern (AI) Backend' stays distinct."""
+        text = (title or "").lower()
+        # Repeatedly peel a trailing (...) or [...] group.
+        while True:
+            stripped = re.sub(r"\s*[\(\[][^\(\)\[\]]*[\)\]]\s*$", "", text).strip()
+            if stripped == text:
+                break
+            text = stripped
+        text = text.replace("–", "-").replace("—", "-")  # en/em dash -> hyphen
+        text = re.sub(r"\s*-?\s*team\s+\d+\s*$", "", text)  # trailing 'Team 01'
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    @staticmethod
+    def _normalize_location(location):
+        """First segment, lowercased, with trailing office/work-mode noise
+        dropped so 'Santa Clara Office' == 'Santa Clara' and
+        'New York (Hybrid)' == 'New York'."""
+        first = (location or "").split(",")[0]
+        first = re.sub(r"\s*[\(\[][^\(\)\[\]]*[\)\]]\s*$", "", first)
+        first = re.sub(
+            r"\s+(office|hq|headquarters|remote|hybrid|onsite|on-site)\s*$",
+            "",
+            first,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(r"\s+", " ", first).strip().lower()
+
+    @classmethod
+    def _dedup_key(cls, row):
+        """Identify a posting by company + normalized title + normalized
+        location, NOT by URL. The same job appears under different aggregator
+        URLs (simplify.jobs, jobright.ai, the raw ATS link), so URL-based
+        dedup posts the same role multiple times. Title and location are
+        normalized (see helpers) so seasonal/office/work-mode suffixes don't
+        split one role into several keys, while genuinely different postings
+        (Optiver Austin vs Chicago) stay distinct."""
+        company = (row.get("company_name") or "").strip().lower()
+        title = cls._normalize_title(row.get("job_title"))
+        location = cls._normalize_location(row.get("job_location"))
+        return (company, title, location)
+
     def insert_internships(self, internships, table=None):
         table = table or self.internships_table
         try:
@@ -43,21 +92,18 @@ class SupabaseDatabase:
             ]
 
             existing = self.get_existing_internships(table)
-            existing_keys = {
-                (item["company_name"], item["job_title"], item["job_url"])
-                for item in existing
-            }
+            existing_keys = {self._dedup_key(item) for item in existing}
 
-            new_internships = [
-                internship
-                for internship in internships
-                if (
-                    internship["company_name"],
-                    internship["job_title"],
-                    internship["job_url"],
-                )
-                not in existing_keys
-            ]
+            # Dedup within this scrape too (a single feed can list the same
+            # role several times under different URLs).
+            new_internships = []
+            seen = set(existing_keys)
+            for internship in internships:
+                key = self._dedup_key(internship)
+                if key in seen:
+                    continue
+                seen.add(key)
+                new_internships.append(internship)
 
             self.logger.info(
                 "Found %d new rows out of %d scraped for %s",
@@ -128,12 +174,39 @@ class SupabaseDatabase:
             self.logger.exception("Failed to fetch unsent rows from %s", table)
             return None
 
+    def get_posted_internships(self, table=None, enriched_only=True, limit=None):
+        """Rows already posted to Discord (have a discord_message_id), joined
+        with company_info for the embed. Used by /refreshembeds to re-render
+        old messages in place. enriched_only skips rows that gained no detail
+        data (nothing new to show). limit caps the row count server-side."""
+        table = table or self.internships_table
+        try:
+            query = (
+                self.supabase.table(table)
+                .select("*, company_info(*)")
+                .not_.is_("discord_message_id", "null")
+            )
+            if enriched_only:
+                query = query.not_.is_("job_summary", "null")
+            query = query.order("job_posted_at", desc=False)
+            if limit is not None:
+                query = query.limit(limit)
+            response = query.execute()
+            self.logger.info(
+                "Found %d posted rows in %s (enriched_only=%s)",
+                len(response.data), table, enriched_only,
+            )
+            return response.data
+        except Exception:
+            self.logger.exception("Failed fetching posted rows from %s", table)
+            return []
+
     def get_existing_internships(self, table=None):
         table = table or self.internships_table
         try:
             response = (
                 self.supabase.table(table)
-                .select("company_name,job_title,job_url")
+                .select("company_name,job_title,job_location,job_url")
                 .execute()
             )
 
@@ -255,6 +328,51 @@ class SupabaseDatabase:
             .eq("id", internship_id)
             .execute()
         )
+
+    # Columns details/ may fill in. Anything not in here is ignored, so a
+    # row carrying joined company_info or other extras is safe to pass in.
+    DETAIL_COLUMNS = (
+        "job_summary",
+        "job_responsibilities",
+        "job_requirements",
+        "job_benefits",
+        "job_tags",
+        "comp_min",
+        "comp_max",
+        "salary_desc",
+        "employment_type",
+        "seniority",
+        "work_model",
+        "is_closed",
+        "job_location",
+    )
+
+    def update_job_details(self, internship_id, details, table=None):
+        """Persist enrichment onto an existing row. Empty values are dropped
+        so a failed lookup never blanks out data the scrape already had."""
+        table = table or self.internships_table
+
+        payload = {
+            key: value
+            for key, value in details.items()
+            if key in self.DETAIL_COLUMNS and value not in (None, "", [])
+        }
+        if not payload:
+            return []
+
+        try:
+            response = (
+                self.supabase.table(table)
+                .update(payload)
+                .eq("id", internship_id)
+                .execute()
+            )
+            return response.data
+        except Exception:
+            self.logger.exception(
+                "Failed updating details for %s %s", table, internship_id
+            )
+            return None
 
     def insert_repo_update_time(self, repo_name, last_updated_at):
         try:

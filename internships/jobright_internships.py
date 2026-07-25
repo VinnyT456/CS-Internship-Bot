@@ -33,13 +33,16 @@ class JobrightInternships:
     def __init__(self):
         load_dotenv()
 
-        self.logger = logging.getLogger("logs/github_internships.log")
+        # Per-class logger so subclasses (JobrightNewGrad) get their own name;
+        # the handler guard stops a second instance double-adding it.
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.setLevel(logging.DEBUG)
-        handler = logging.FileHandler("logs/github_internships.log", mode="a")
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        )
-        self.logger.addHandler(handler)
+        if not self.logger.handlers:
+            handler = logging.FileHandler("logs/scrapers.log", mode="a")
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            )
+            self.logger.addHandler(handler)
 
         self.auth = Auth.Token(os.getenv("GITHUB_TOKEN"))
         self.github = Github(auth=self.auth)
@@ -145,6 +148,9 @@ class JobrightInternships:
                     continue
 
                 row["job_url"] = job_url
+                # jobright's own posting page IS the apply link, so the detail
+                # scraper reads the same URL.
+                row["detail_url"] = job_url
                 row["job_posted_at"] = posted_dt.strftime("%Y-%m-%d")
                 row["job_title"] = emoji.replace_emoji(
                     str(row.get("job_title", "")), replace=""

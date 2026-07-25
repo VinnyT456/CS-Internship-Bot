@@ -13,3 +13,4 @@ emoji
 fastapi
 uvicorn
 ddgs
+google-genai

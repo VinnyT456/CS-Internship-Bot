@@ -40,7 +40,7 @@ class CompanySearch:
     }
 
     def __init__(self):
-        self.logger = logging.getLogger("github_internships")
+        self.logger = logging.getLogger("company_search")
 
     @staticmethod
     def _careers_url(company):

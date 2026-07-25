@@ -15,13 +15,15 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
+import details
 from database.database import SupabaseDatabase
-from internships.github_internships import GithubInternships
 from internships.jobright_internships import JobrightInternships
 from internships.simplify_internships import SimplifyInternships
-from new_grads.github_new_grad import GithubNewGrad
 from new_grads.jobright_new_grad import JobrightNewGrad
 from new_grads.simplify_new_grad import SimplifyNewGrad
+from commands import testwelcome as testwelcome_cmd
+from commands import clearinternships as clearinternships_cmd
+from commands import refreshembeds as refreshembeds_cmd
 
 
 load_dotenv()
@@ -47,6 +49,15 @@ MESSAGE_SEND_DELAY_SECONDS = 1.2
 # ~1.2s/post × 400 ≈ 8 min, comfortably under 15. Remaining rows stay unsent
 # and carry to the next cycle.
 MAX_POSTS_PER_CYCLE = 400
+
+# Detail-page fetches run concurrently. Kept low: each worker holds a response
+# body, and Render's instance is small. 4 workers ≈ 1 posting/sec end to end,
+# well inside the 15-minute cycle even at the 400-post cap.
+ENRICH_WORKERS = int(os.getenv("ENRICH_WORKERS", "4"))
+# Concurrent message edits during /refreshembeds. Discord's edit rate is ~5/s
+# per channel; discord.py backs off on 429 on its own, so this just caps how
+# many edits are in flight at once.
+REFRESH_CONCURRENCY = int(os.getenv("REFRESH_CONCURRENCY", "5"))
 
 CHANNEL_CACHE = {}
 SEARCH_URL_CACHE = {}
@@ -137,14 +148,14 @@ def _run_scraper(scraper):
         logger.exception("Scraper %s failed", scraper.__class__.__name__)
 
 
-INTERNSHIP_SCRAPERS = (GithubInternships, JobrightInternships, SimplifyInternships)
-NEW_GRAD_SCRAPERS = (GithubNewGrad, JobrightNewGrad, SimplifyNewGrad)
+INTERNSHIP_SCRAPERS = (JobrightInternships, SimplifyInternships)
+NEW_GRAD_SCRAPERS = (JobrightNewGrad, SimplifyNewGrad)
 
 
 def _scrape_all(scraper_classes):
     # Sequential, not concurrent: each repo's README soup balloons to ~25 MB
     # during parsing. Running them back-to-back keeps only one soup alive at
-    # a time and frees it (gc) before the next — running all three at once
+    # a time and frees it (gc) before the next — running them all at once
     # tripled the peak and OOM'd Render's 512 MB instance.
     for cls in scraper_classes:
         _run_scraper(_get(cls))
@@ -159,6 +170,36 @@ def fetch_new_internships():
 def fetch_new_grads():
     _scrape_all(NEW_GRAD_SCRAPERS)
     return get_db().get_unsent_internships("new_grads") or []
+
+
+def enrich_rows(rows, table):
+    """Fetch each posting's detail page and persist what comes back.
+
+    Runs on a worker thread (called via asyncio.to_thread) because the
+    enrichers are blocking httpx. Rows whose lookup fails come back
+    unchanged, so a dead detail page only costs us the extra fields.
+    """
+    if not rows:
+        return []
+
+    try:
+        enriched = details.enrich_jobs(rows, max_workers=ENRICH_WORKERS)
+    except Exception:
+        logger.exception("Detail enrichment failed; posting unenriched rows")
+        return rows
+    finally:
+        # Drop pooled sockets between cycles rather than holding them open
+        # for the 15 minutes until the next one.
+        details.close_http_clients()
+        gc.collect()
+
+    db = get_db()
+    for original, row in zip(rows, enriched):
+        if row is original:
+            continue
+        db.update_job_details(row["id"], row, table)
+
+    return enriched
 
 
 def mark_internship_as_sent(internship_id, table):
@@ -242,7 +283,43 @@ def format_location(location):
     return truncate_embed_value(location_formatted)
 
 
-async def send_internship(internship, channel, table, type="internship"):
+def format_bullets(items, limit=3, max_item_len=180):
+    """Top `limit` list entries as bullets, with a '+N more' tail. Each entry
+    is trimmed so one long paragraph can't eat the whole 1024-char field."""
+    items = [str(i).strip() for i in (items or []) if str(i).strip()]
+    if not items:
+        return None
+
+    shown = items[:limit]
+    lines = [f"• {truncate_embed_value(i, max_item_len)}" for i in shown]
+    if len(items) > limit:
+        lines.append(f"• +{len(items) - limit} more")
+
+    return truncate_embed_value("\n".join(lines))
+
+
+def format_pay(internship):
+    """Prefer the human string the detail page gave; else build one from the
+    annualized-thousands comp range."""
+    pay = internship.get("salary_desc")
+    if pay:
+        return pay
+    low = internship.get("comp_min")
+    if not low:
+        return None
+    high = internship.get("comp_max") or low
+    return f"${low}k/yr" if low == high else f"${low}k - ${high}k/yr"
+
+
+def build_internship_embed(internship, type="internship"):
+    """Build the posting embed from a row. Shared by the live post path and
+    the /refreshembeds command so both render identically. Every enrichment
+    block is conditional — a row missing detail columns degrades to the
+    compact form rather than showing blank fields. A row flagged is_closed
+    gets the closed treatment instead."""
+    if internship.get("is_closed"):
+        return build_closed_embed(internship)
+
     company_info = normalize_company_info(internship.get("company_info"))
 
     company = company_info.get("company_name") or internship.get("company_name") or "Unknown"
@@ -256,57 +333,82 @@ async def send_internship(internship, channel, table, type="internship"):
     url = internship.get("job_url")
     posted = internship.get("job_posted_at") or "Unknown"
 
+    # Title is the role; the company + its context sit in the author line so
+    # the two read as a clean two-tier header rather than repeating the name.
     embed = discord.Embed(
-        title=f"🚀 {title}",
+        title=title,
         url=url,
         color=CATEGORY_COLORS.get(category, discord.Color.blurple()),
         timestamp=discord.utils.utcnow(),
     )
 
+    # Author subtitle packs the taxonomy (category · type) next to the name so
+    # those don't each need their own field below.
+    author_bits = [category]
+    if type:
+        author_bits.append(str(type).title())
     embed.set_author(
-        name=company,
+        name=f"{company}  •  {'  ·  '.join(author_bits)}",
         icon_url=company_logo or BOT_AVATAR_URL,
     )
 
-    embed.description = f"## {company}"
+    # Enrichment is best-effort — every block below no-ops when the detail
+    # lookup came back empty, so the embed degrades gracefully.
+    summary = internship.get("job_summary")
+    if summary:
+        embed.description = truncate_embed_value(summary, 600)
 
-    embed.add_field(
-        name="💻 Category",
-        value=f"```{truncate_embed_value(category, 1018)}```",
-        inline=True,
-    )
+    # --- Compensation leads: it's the field applicants scan for. Highlighted
+    # as a full-width line so it reads before the rest of the grid.
+    pay = format_pay(internship)
+    if pay:
+        embed.add_field(name="💰 Compensation", value=f"**{pay}**", inline=False)
 
-    embed.add_field(
-        name="📍 Location",
-        value=f"```{format_location(location)}```",
-        inline=True,
-    )
+    # --- Stat grid: only the facts we actually have. Discord lays inline
+    # fields out three per row, so we collect the present ones and pad the
+    # last row to a multiple of three instead of hand-placing spacers.
+    stats = [
+        ("🏢 Work Model", internship.get("work_model")),
+        ("📈 Level", internship.get("seniority")),
+        ("📍 Location", format_location(location)),
+        ("🗓️ Posted", posted),
+    ]
+    present = [(name, value) for name, value in stats if value]
+    for name, value in present:
+        embed.add_field(
+            name=name,
+            value=truncate_embed_value(str(value), 1018),
+            inline=True,
+        )
+    for _ in range((3 - len(present) % 3) % 3):
+        embed.add_field(name="​", value="​", inline=True)
 
-    # Force next row. Discord displays inline fields in rows of three.
-    embed.add_field(
-        name="\u200b",
-        value="\u200b",
-        inline=True,
-    )
+    # --- The richest new payload: what the role does and what it needs.
+    responsibilities = format_bullets(internship.get("job_responsibilities"))
+    if responsibilities:
+        embed.add_field(
+            name="📋 What you'll do",
+            value=responsibilities,
+            inline=False,
+        )
 
-    embed.add_field(
-        name="🗓️ Posted",
-        value=f"```{truncate_embed_value(posted, 1018)}```",
-        inline=True,
-    )
+    requirements = format_bullets(internship.get("job_requirements"))
+    if requirements:
+        embed.add_field(
+            name="✅ Requirements",
+            value=requirements,
+            inline=False,
+        )
 
-    embed.add_field(
-        name="💼 Type",
-        value=f"```{type}```",
-        inline=True,
-    )
-
-    # Force next section.
-    embed.add_field(
-        name="\u200b",
-        value="\u200b",
-        inline=True,
-    )
+    tags = internship.get("job_tags")
+    if tags:
+        embed.add_field(
+            name="🏷️ Skills",
+            value=truncate_embed_value(
+                " • ".join(f"`{t}`" for t in tags[:8]), 1018
+            ),
+            inline=False,
+        )
 
     if url:
         embed.add_field(
@@ -315,34 +417,63 @@ async def send_internship(internship, channel, table, type="internship"):
             inline=False,
         )
 
-    source_url = internship.get("source_repo")
-
-    embed.add_field(
-        name="📂 Source",
-        value=f"[Source Repository]({source_url})",
-        inline=True,
-    )
-
+    # --- Links compressed onto one line instead of three separate fields.
     fallback_urls = get_fallback_search_urls(company)
     website = company_website or fallback_urls["website"]
     linkedin = company_linkedin or fallback_urls["linkedin"]
+    source_url = internship.get("source_repo")
+
+    links = [f"[Website]({website})", f"[LinkedIn]({linkedin})"]
+    if source_url:
+        links.append(f"[Source]({source_url})")
 
     embed.add_field(
-        name="🔍 Research",
-        value=f"[Company Website]({website}) • [LinkedIn]({linkedin})",
-        inline=True,
+        name="🔗 Links",
+        value=" • ".join(links),
+        inline=False,
     )
 
-    embed.add_field(
-        name="\u200b",
-        value="\u200b",
-        inline=True,
-    )
+    embed.set_footer(text="CS Internship Bot", icon_url=BOT_AVATAR_URL)
 
-    embed.set_footer(
-        text="CS Internship Bot • Auto-updated every 15 minutes",
-        icon_url=BOT_AVATAR_URL,
+    return embed
+
+
+def build_closed_embed(internship):
+    """A muted embed for postings the detail page reported as closed, so an
+    edited-in-place message reads as dead rather than sending members to a
+    broken link."""
+    company_info = normalize_company_info(internship.get("company_info"))
+    company = (
+        company_info.get("company_name")
+        or internship.get("company_name")
+        or "Unknown"
     )
+    title = internship.get("job_title") or "Untitled Internship"
+
+    embed = discord.Embed(
+        title=f"🔒 {title}",
+        color=discord.Color.dark_grey(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_author(name=company, icon_url=BOT_AVATAR_URL)
+    embed.description = (
+        f"## {company}\n"
+        "⚠️ **This posting has closed** — it's no longer accepting applicants."
+    )
+    posted = internship.get("job_posted_at")
+    if posted:
+        embed.add_field(name="🗓️ Was posted", value=str(posted), inline=True)
+    location = internship.get("job_location")
+    if location:
+        embed.add_field(
+            name="📍 Location", value=format_location(location), inline=True
+        )
+    embed.set_footer(text="CS Internship Bot • Posting closed")
+    return embed
+
+
+async def send_internship(internship, channel, table, type="internship"):
+    embed = build_internship_embed(internship, type)
 
     message = await channel.send(embed=embed)
 
@@ -361,10 +492,22 @@ async def _post_batch(rows, channel, kind, table):
         )
         rows = rows[:MAX_POSTS_PER_CYCLE]
 
+    # Enrich after the cap so we only pay for detail pages we're about to post.
+    rows = await asyncio.to_thread(enrich_rows, rows, table)
+
     for internship in rows:
         internship_id = internship.get("id", "unknown")
 
         try:
+            # The detail page said the posting is gone. Burn the row rather
+            # than send members to a dead link.
+            if internship.get("is_closed"):
+                logger.info("Skipping closed %s %s", kind, internship_id)
+                await asyncio.to_thread(
+                    mark_internship_as_sent, internship["id"], table
+                )
+                continue
+
             await send_internship(internship, channel, table, kind)
 
             await asyncio.to_thread(
@@ -384,6 +527,92 @@ async def _post_batch(rows, channel, kind, table):
 
         except Exception:
             logger.exception("Failed sending %s %s", kind, internship_id)
+
+
+# (table -> channel cache key, channel id) for the refresh command.
+REFRESH_TARGETS = (
+    ("internships", "internships", INTERNSHIPS_CHANNEL_ID),
+    ("new_grads", "new_grads", NEW_GRADS_CHANNEL_ID),
+)
+
+
+async def refresh_posted_embeds(kind="internship", progress=None, limit=None,
+                                only_table=None):
+    """Re-render already-posted messages in place with the current (enriched)
+    embed. Fetches each row's stored discord_message_id, rebuilds the embed,
+    and edits the message. Missing messages (deleted by hand) are skipped and
+    their message_id cleared so we don't retry them next run.
+
+    limit: cap the TOTAL messages touched across both tables (None = all).
+        Lets you test on a handful before committing to the full ~1300-edit,
+        ~26-minute run.
+    only_table: restrict to "internships" or "new_grads" (None = both).
+    progress: optional async callable(done, total, table) for live updates.
+    Returns a stats dict.
+    """
+    stats = {"edited": 0, "skipped_missing": 0, "failed": 0, "total": 0}
+
+    db = get_db()
+    plan = []
+    remaining = limit
+    for table, cache_key, channel_id in REFRESH_TARGETS:
+        if only_table and table != only_table:
+            continue
+        if remaining is not None and remaining <= 0:
+            break
+        rows = await asyncio.to_thread(db.get_posted_internships, table, True, remaining)
+        channel = await get_cached_channel(cache_key, channel_id)
+        plan.append((table, channel, rows or []))
+        stats["total"] += len(rows or [])
+        if remaining is not None:
+            remaining -= len(rows or [])
+
+    # Concurrency cap: discord.py handles per-route 429 backoff internally, so
+    # instead of a fixed sleep we fan out and let this bound in-flight edits.
+    # ~5 concurrent stays under Discord's edit rate and cuts a 1300-message run
+    # from ~26 min to ~5-6 min.
+    semaphore = asyncio.Semaphore(REFRESH_CONCURRENCY)
+    counter = {"done": 0}
+
+    async def handle(table, channel, row):
+        message_id = row.get("discord_message_id")
+        async with semaphore:
+            try:
+                message = await channel.fetch_message(int(message_id))
+            except discord.NotFound:
+                stats["skipped_missing"] += 1
+                await asyncio.to_thread(
+                    update_internship_message_id, row["id"], None, table
+                )
+                return
+            except discord.HTTPException:
+                logger.exception("Fetch failed for %s msg %s", table, message_id)
+                stats["failed"] += 1
+                return
+
+            try:
+                embed = build_internship_embed(row, kind)
+                await message.edit(embed=embed)
+                stats["edited"] += 1
+            except discord.HTTPException as exc:
+                logger.exception("Edit failed for %s msg %s: %s", table, message_id, exc)
+                stats["failed"] += 1
+            except Exception:
+                logger.exception("Rebuild failed for %s row %s", table, row.get("id"))
+                stats["failed"] += 1
+            finally:
+                counter["done"] += 1
+                if progress and counter["done"] % 50 == 0:
+                    await progress(counter["done"], stats["total"], table)
+
+    tasks_ = [
+        handle(table, channel, row)
+        for table, channel, rows in plan
+        for row in rows
+    ]
+    await asyncio.gather(*tasks_)
+
+    return stats
 
 
 @tasks.loop(minutes=15)
@@ -612,53 +841,35 @@ async def on_member_join(member):
         logger.exception("Failed sending welcome message for member %s", member.id)
 
 
-@bot.tree.command(
-    name="testwelcome",
-    description="Preview the Silver Wolf welcome message (uses you as the new member)",
+# Discord's own "X joined the server" system line is posted separately from
+# on_member_join (in the guild's system channel), so we catch it here and
+# delete it — Silver Wolf's embed is the only welcome we want to show.
+@bot.event
+async def on_message(message):
+    if message.type is discord.MessageType.new_member:
+        try:
+            await message.delete()
+        except discord.Forbidden:
+            logger.warning(
+                "Missing Manage Messages to delete system join line in #%s",
+                getattr(message.channel, "name", message.channel.id),
+            )
+        except discord.HTTPException:
+            logger.exception("Failed deleting system join message")
+        return
+
+    # Keep prefix/other message handling working (slash commands don't need
+    # this, but drop-through is the safe default if any get added later).
+    await bot.process_commands(message)
+
+
+# Slash commands live in the commands/ package; register them here with the
+# deps each needs from this module.
+testwelcome_cmd.register(bot, send_welcome=send_welcome, logger=logger)
+clearinternships_cmd.register(bot, logger=logger)
+refreshembeds_cmd.register(
+    bot, refresh_posted_embeds=refresh_posted_embeds, logger=logger
 )
-@discord.app_commands.default_permissions(administrator=True)
-async def testwelcome(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        await send_welcome(interaction.user)
-    except Exception:
-        logger.exception("Failed sending test welcome message")
-        await interaction.followup.send("Failed to send welcome message.")
-        return
-
-    await interaction.followup.send("Welcome message fired. Check the channel.")
-
-
-@bot.tree.command(
-    name="clearinternships",
-    description="Delete all messages in the channel this command is run in",
-)
-@discord.app_commands.default_permissions(administrator=True)
-async def clearinternships(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    channel = interaction.channel
-
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.followup.send("Run this command inside a text channel.")
-        return
-
-    try:
-        # purge() bulk-deletes in chunks of 100 (messages <14 days) and falls
-        # back to individual deletes for older ones — handles everything.
-        deleted = await channel.purge(limit=None)
-    except discord.Forbidden:
-        await interaction.followup.send(
-            "I need the **Manage Messages** permission in this channel."
-        )
-        return
-    except discord.HTTPException:
-        logger.exception("Failed purging channel %s", channel.id)
-        await interaction.followup.send("Failed to delete messages.")
-        return
-
-    await interaction.followup.send(f"Deleted {len(deleted)} message(s).")
 
 
 @bot.event

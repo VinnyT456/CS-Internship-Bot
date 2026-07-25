@@ -22,13 +22,16 @@ class SimplifyInternships:
     def __init__(self):
         load_dotenv()
 
-        self.logger = logging.getLogger("logs/github_internships.log")
+        # Per-class logger so subclasses (SimplifyNewGrad) get their own name;
+        # the handler guard stops a second instance double-adding it.
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.setLevel(logging.DEBUG)
-        handler = logging.FileHandler("logs/github_internships.log", mode="a")
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        )
-        self.logger.addHandler(handler)
+        if not self.logger.handlers:
+            handler = logging.FileHandler("logs/scrapers.log", mode="a")
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            )
+            self.logger.addHandler(handler)
 
         self.auth = Auth.Token(os.getenv("GITHUB_TOKEN"))
         self.github = Github(auth=self.auth)
@@ -92,14 +95,20 @@ class SimplifyInternships:
 
                 row = {}
                 job_url = None
+                detail_url = None
 
                 for header, cell in zip(headers, cells):
                     if header == "Application":
-                        # first anchor = real ATS apply link (second is a
-                        # simplify.jobs redirect)
-                        anchor = cell.find("a", href=True)
-                        if anchor:
-                            job_url = anchor["href"]
+                        # first anchor = real ATS apply link (the other is a
+                        # simplify.jobs redirect). We keep the ATS link for
+                        # the Apply button and the simplify.jobs link for the
+                        # detail scraper, which reads simplify's own page.
+                        for anchor in cell.find_all("a", href=True):
+                            href = anchor["href"]
+                            if "simplify.jobs/p/" in href:
+                                detail_url = detail_url or href
+                            elif job_url is None:
+                                job_url = href
                         continue
 
                     if header == "Age":
@@ -114,12 +123,10 @@ class SimplifyInternships:
                 if row.get("company_name") in ("↳", ""):
                     row["company_name"] = prev.get("company_name")
 
+                # Locked postings carry only the simplify.jobs redirect, so
+                # job_url stays None and they drop out here.
                 company = row.get("company_name")
                 if not company or not job_url:
-                    continue
-
-                # Locked postings only have the simplify.jobs redirect anchor
-                if "simplify.jobs/p/" in job_url:
                     continue
 
                 age = row.get("_age")
@@ -136,6 +143,7 @@ class SimplifyInternships:
                     continue
 
                 row["job_url"] = job_url
+                row["detail_url"] = detail_url
                 row["job_posted_at"] = posted_dt.strftime("%Y-%m-%d")
                 row["company_name"] = emoji.replace_emoji(company, replace="").strip()
                 row["job_title"] = emoji.replace_emoji(
