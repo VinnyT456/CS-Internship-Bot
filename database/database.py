@@ -32,6 +32,68 @@ class SupabaseDatabase:
         self.new_grads_table = "new_grads"
         self.companies_table = "company_info"
         self.repo_table = "repo_info"
+        self.users_table = "users"
+        self.saved_jobs_table = "saved_jobs"
+
+    def get_or_create_user(self, discord_id, username=None, display_name=None):
+        """Return the users.id UUID for a Discord member, inserting the row on
+        first contact. Used by the Save button so a save always has a user to
+        attach to."""
+        try:
+            existing = (
+                self.supabase.table(self.users_table)
+                .select("id")
+                .eq("discord_id", discord_id)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                return existing.data[0]["id"]
+
+            created = (
+                self.supabase.table(self.users_table)
+                .insert(
+                    {
+                        "discord_id": discord_id,
+                        "username": username,
+                        "display_name": display_name,
+                    }
+                )
+                .execute()
+            )
+            return created.data[0]["id"] if created.data else None
+        except Exception:
+            self.logger.exception("Failed get_or_create_user for %s", discord_id)
+            return None
+
+    def toggle_saved_job(self, user_uuid, job_table, job_id):
+        """Save the job if not saved, unsave it if already saved. Returns True
+        when it ends up saved, False when unsaved, None on error."""
+        try:
+            existing = (
+                self.supabase.table(self.saved_jobs_table)
+                .select("id")
+                .eq("user_id", user_uuid)
+                .eq("job_table", job_table)
+                .eq("job_id", job_id)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                self.supabase.table(self.saved_jobs_table).delete().eq(
+                    "id", existing.data[0]["id"]
+                ).execute()
+                return False
+
+            self.supabase.table(self.saved_jobs_table).insert(
+                {"user_id": user_uuid, "job_table": job_table, "job_id": job_id}
+            ).execute()
+            return True
+        except Exception:
+            self.logger.exception(
+                "Failed toggling saved job %s/%s for %s", job_table, job_id, user_uuid
+            )
+            return None
 
     @staticmethod
     def _normalize_title(title):

@@ -118,9 +118,24 @@ CREATE TABLE IF NOT EXISTS public.resumes (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Jobs a member saved via the Save button. job_table + job_id is a
+-- polymorphic reference (a job lives in internships OR new_grads), so there's
+-- no single FK — the app guarantees the pair points at a real row.
+CREATE TABLE IF NOT EXISTS public.saved_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL
+        REFERENCES users(id),
+    job_table TEXT NOT NULL,          -- 'internships' | 'new_grads'
+    job_id BIGINT NOT NULL,
+    saved_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (user_id, job_table, job_id)
+);
+
 ALTER TABLE IF EXISTS public.company_info DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.internships DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.new_grads DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.repo_info DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.users DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.resumes DISABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS public.saved_jobs DISABLE ROW LEVEL SECURITY;

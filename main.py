@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import logging
+import re
 import logging.handlers
 import os
 import random
@@ -283,6 +284,32 @@ def format_location(location):
     return truncate_embed_value(location_formatted)
 
 
+def format_location_inline(location, limit=2):
+    """Locations on one line for the header strip: 'Seattle, WA · Austin, TX'
+    with a '+N more' tail. The multi-line bulleted form is too tall for a
+    header, so this is the compact counterpart to format_location()."""
+    parts = [loc.strip() for loc in (location or "").split(" | ") if loc.strip()]
+    if not parts:
+        return None
+
+    if len(parts) <= limit:
+        return " · ".join(parts)
+
+    return f"{' · '.join(parts[:limit])} +{len(parts) - limit} more"
+
+
+def format_posted(value):
+    """'2026-07-25' -> 'Jul 25, 2026'. An ISO date reads like machine output;
+    the human form belongs in a header line. Falls back to the raw value."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{parsed:%b} {parsed.day}, {parsed.year}"
+
+
 def format_bullets(items, limit=3, max_item_len=180):
     """Top `limit` list entries as bullets, with a '+N more' tail. Each entry
     is trimmed so one long paragraph can't eat the whole 1024-char field."""
@@ -298,6 +325,64 @@ def format_bullets(items, limit=3, max_item_len=180):
     return truncate_embed_value("\n".join(lines))
 
 
+# How many items each section shows before the single Show-more button
+# reveals the rest.
+SECTION_PREVIEW = 3
+SKILLS_PREVIEW = 6
+
+
+def format_section(items, expanded=False, max_item_len=220):
+    """Blockquote-rendered section for responsibilities/requirements. Discord
+    draws '> ' lines with a colored bar and a touch more spacing, which reads
+    larger and cleaner than plain bullets. Collapsed shows SECTION_PREVIEW
+    items with a hint; expanded shows all (capped to the 1024-char field)."""
+    items = [str(i).strip() for i in (items or []) if str(i).strip()]
+    if not items:
+        return None
+
+    shown = items if expanded else items[:SECTION_PREVIEW]
+    lines = [f"> {truncate_embed_value(i, max_item_len)}" for i in shown]
+
+    hidden = len(items) - len(shown)
+    if hidden > 0:
+        lines.append(f"*+{hidden} more*")
+
+    return truncate_embed_value("\n".join(lines))
+
+
+def format_skills(tags, expanded=False):
+    """Skill chips as inline code, collapsed to SKILLS_PREVIEW with a hint."""
+    tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
+    if not tags:
+        return None
+
+    shown = tags if expanded else tags[:SKILLS_PREVIEW]
+    # Adjacent code chips read as tags; a bullet separator between them adds
+    # visual noise the chip borders already provide.
+    text = "  ".join(f"`{t}`" for t in shown)
+
+    hidden = len(tags) - len(shown)
+    if hidden > 0:
+        # Own line so the italic hint doesn't run into the last chip.
+        text += f"\n*+{hidden} more*"
+
+    return truncate_embed_value(text, 1018)
+
+
+def job_has_more(internship):
+    """True when any collapsible section overflows its preview — i.e. the one
+    Show-more button is worth showing."""
+    def over(field, preview):
+        items = [i for i in (internship.get(field) or []) if str(i).strip()]
+        return len(items) > preview
+
+    return (
+        over("job_responsibilities", SECTION_PREVIEW)
+        or over("job_requirements", SECTION_PREVIEW)
+        or over("job_tags", SKILLS_PREVIEW)
+    )
+
+
 def format_pay(internship):
     """Prefer the human string the detail page gave; else build one from the
     annualized-thousands comp range."""
@@ -311,12 +396,23 @@ def format_pay(internship):
     return f"${low}k/yr" if low == high else f"${low}k - ${high}k/yr"
 
 
-def build_internship_embed(internship, type="internship"):
+def _job_type_label(internship, kind):
+    """The posting's own employment type when the detail page gave one
+    ('Full Time', 'Intern', 'Part Time'); otherwise fall back to the channel
+    kind (internship / new grad). Most postings are internships, so the
+    fallback is usually right anyway."""
+    return internship.get("employment_type") or str(kind).title()
+
+
+def build_internship_embed(internship, type="internship", expanded=False):
     """Build the posting embed from a row. Shared by the live post path and
     the /refreshembeds command so both render identically. Every enrichment
     block is conditional — a row missing detail columns degrades to the
     compact form rather than showing blank fields. A row flagged is_closed
-    gets the closed treatment instead."""
+    gets the closed treatment instead.
+
+    expanded: when True, responsibilities/requirements/skills all render in
+    full. The single Show-more button toggles it."""
     if internship.get("is_closed"):
         return build_closed_embed(internship)
 
@@ -333,8 +429,8 @@ def build_internship_embed(internship, type="internship"):
     url = internship.get("job_url")
     posted = internship.get("job_posted_at") or "Unknown"
 
-    # Title is the role; the company + its context sit in the author line so
-    # the two read as a clean two-tier header rather than repeating the name.
+    # Title is the role; the company sits in the author line so the two read
+    # as a clean two-tier header rather than repeating the name.
     embed = discord.Embed(
         title=title,
         url=url,
@@ -342,34 +438,20 @@ def build_internship_embed(internship, type="internship"):
         timestamp=discord.utils.utcnow(),
     )
 
-    # Author subtitle packs the taxonomy (category · type) next to the name so
-    # those don't each need their own field below.
-    author_bits = [category]
-    if type:
-        author_bits.append(str(type).title())
     embed.set_author(
-        name=f"{company}  •  {'  ·  '.join(author_bits)}",
+        name=company,
         icon_url=company_logo or BOT_AVATAR_URL,
     )
 
-    # Enrichment is best-effort — every block below no-ops when the detail
-    # lookup came back empty, so the embed degrades gracefully.
-    summary = internship.get("job_summary")
-    if summary:
-        embed.description = truncate_embed_value(summary, 600)
-
-    # --- Compensation leads: it's the field applicants scan for. Highlighted
-    # as a full-width line so it reads before the rest of the grid.
-    pay = format_pay(internship)
-    if pay:
-        embed.add_field(name="💰 Compensation", value=f"**{pay}**", inline=False)
-
-    # --- Stat grid: only the facts we actually have. Discord lays inline
-    # fields out three per row, so we collect the present ones and pad the
-    # last row to a multiple of three instead of hand-placing spacers.
+    # --- Stat grid: code-block boxes, three per row. Only the facts we have;
+    # the last row is padded to a multiple of three so the next section starts
+    # clean. Level was dropped (redundant for an internship board); Type comes
+    # from the posting itself.
     stats = [
+        ("💰 Compensation", format_pay(internship)),
         ("🏢 Work Model", internship.get("work_model")),
-        ("📈 Level", internship.get("seniority")),
+        ("💼 Type", _job_type_label(internship, type)),
+        ("💻 Category", category),
         ("📍 Location", format_location(location)),
         ("🗓️ Posted", posted),
     ]
@@ -377,14 +459,18 @@ def build_internship_embed(internship, type="internship"):
     for name, value in present:
         embed.add_field(
             name=name,
-            value=truncate_embed_value(str(value), 1018),
+            value=f"```{truncate_embed_value(str(value), 1018)}```",
             inline=True,
         )
     for _ in range((3 - len(present) % 3) % 3):
         embed.add_field(name="​", value="​", inline=True)
 
-    # --- The richest new payload: what the role does and what it needs.
-    responsibilities = format_bullets(internship.get("job_responsibilities"))
+    # --- Responsibilities / requirements as blockquotes (more readable than
+    # cramped bullets); skills as chips. All three collapse together and are
+    # revealed by the single Show-more button in the component row below.
+    responsibilities = format_section(
+        internship.get("job_responsibilities"), expanded=expanded
+    )
     if responsibilities:
         embed.add_field(
             name="📋 What you'll do",
@@ -392,7 +478,9 @@ def build_internship_embed(internship, type="internship"):
             inline=False,
         )
 
-    requirements = format_bullets(internship.get("job_requirements"))
+    requirements = format_section(
+        internship.get("job_requirements"), expanded=expanded
+    )
     if requirements:
         embed.add_field(
             name="✅ Requirements",
@@ -400,22 +488,12 @@ def build_internship_embed(internship, type="internship"):
             inline=False,
         )
 
-    tags = internship.get("job_tags")
-    if tags:
-        embed.add_field(
-            name="🏷️ Skills",
-            value=truncate_embed_value(
-                " • ".join(f"`{t}`" for t in tags[:8]), 1018
-            ),
-            inline=False,
-        )
+    # Skills keep the newer chip format (double-space chips + '\n-# +N more').
+    skills = format_skills(internship.get("job_tags"), expanded=expanded)
+    if skills:
+        embed.add_field(name="🏷️ Skills", value=skills, inline=False)
 
-    if url:
-        embed.add_field(
-            name="🟢 Apply",
-            value=f"**[Open Internship ↗]({url})**",
-            inline=False,
-        )
+    # Apply is a link button in the component row, not an embed field.
 
     # --- Links compressed onto one line instead of three separate fields.
     fallback_urls = get_fallback_search_urls(company)
@@ -457,25 +535,164 @@ def build_closed_embed(internship):
     )
     embed.set_author(name=company, icon_url=BOT_AVATAR_URL)
     embed.description = (
-        f"## {company}\n"
         "⚠️ **This posting has closed** — it's no longer accepting applicants."
     )
     posted = internship.get("job_posted_at")
     if posted:
-        embed.add_field(name="🗓️ Was posted", value=str(posted), inline=True)
+        embed.add_field(name="🗓️ Was posted", value=f"```{posted}```", inline=True)
     location = internship.get("job_location")
     if location:
         embed.add_field(
-            name="📍 Location", value=format_location(location), inline=True
+            name="📍 Location",
+            value=f"```{format_location(location)}```",
+            inline=True,
         )
     embed.set_footer(text="CS Internship Bot • Posting closed")
     return embed
 
 
+# --- Message components (buttons) ---------------------------------------
+# Discord embeds can't hold buttons, so Apply / Show more / Save live as
+# message components. State is stateless-by-custom_id: every click re-reads
+# the row and the current embed, so the buttons survive restarts without a
+# registered persistent View — on_interaction routes jobsec:* clicks.
+
+
+def _fetch_row_for_buttons(table, row_id):
+    """Re-read a single posting (joined with company_info) so a button click
+    rebuilds the exact embed even after a restart."""
+    resp = (
+        get_db()
+        .supabase.table(table)
+        .select("*, company_info(*)")
+        .eq("id", row_id)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+# The collapse hint a section carries only while collapsed: '*+3 more*'.
+_MORE_HINT_RE = re.compile(r"\*\+\d+ more\*")
+
+
+def _is_expanded(embed):
+    """True when the embed is showing sections in full. Detected by the
+    absence of the '*+N more*' overflow hint that only a collapsed section
+    carries."""
+    for field in embed.fields:
+        if _MORE_HINT_RE.search(field.value or ""):
+            return False
+    return True
+
+
+def build_job_view(internship, table, expanded=False):
+    """Component row for a posting: Apply (link) · Show more/less (toggle,
+    only when something overflows) · Save. Always returns a View — Apply and
+    Save are on every post."""
+    view = discord.ui.View(timeout=None)
+    row_id = internship["id"]
+    url = internship.get("job_url")
+
+    if url:
+        view.add_item(
+            discord.ui.Button(
+                label="Apply",
+                style=discord.ButtonStyle.link,
+                url=url,
+                emoji="🟢",
+            )
+        )
+
+    if job_has_more(internship):
+        view.add_item(
+            discord.ui.Button(
+                label="Show less" if expanded else "Show more",
+                # Blurple accent — the primary in-message action.
+                style=discord.ButtonStyle.primary,
+                custom_id=f"jobsec:more:{table}:{row_id}",
+                emoji="📄",
+            )
+        )
+
+    view.add_item(
+        discord.ui.Button(
+            label="Save",
+            # Grey — the two colored slots (green/blurple) are taken by
+            # Apply/Show more, and red reads as destructive.
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"jobsec:save:{table}:{row_id}",
+            emoji="🔖",
+        )
+    )
+
+    return view
+
+
+async def _handle_more(interaction, table, row_id):
+    row = await asyncio.to_thread(_fetch_row_for_buttons, table, int(row_id))
+    if not row:
+        await interaction.response.send_message(
+            "That posting is no longer available.", ephemeral=True
+        )
+        return
+
+    expanded = not _is_expanded(interaction.message.embeds[0])
+    embed = build_internship_embed(row, expanded=expanded)
+    view = build_job_view(row, table, expanded=expanded)
+    await interaction.response.edit_message(embed=embed, view=view)
+
+
+async def _handle_save(interaction, table, row_id):
+    user = interaction.user
+    db = get_db()
+    user_uuid = await asyncio.to_thread(
+        db.get_or_create_user, user.id, user.name, user.display_name
+    )
+    if not user_uuid:
+        await interaction.response.send_message(
+            "Couldn't save right now — try again later.", ephemeral=True
+        )
+        return
+
+    saved = await asyncio.to_thread(
+        db.toggle_saved_job, user_uuid, table, int(row_id)
+    )
+    if saved is None:
+        await interaction.response.send_message(
+            "Couldn't save right now — try again later.", ephemeral=True
+        )
+    elif saved:
+        await interaction.response.send_message(
+            "🔖 Saved. Find it in your saved jobs.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "Removed from your saved jobs.", ephemeral=True
+        )
+
+
+async def handle_section_button(interaction):
+    """Router for jobsec:* button clicks, dispatched from on_interaction.
+
+    custom_id shape: jobsec:<action>:<table>:<row_id>
+    """
+    try:
+        _prefix, action, table, row_id = interaction.data["custom_id"].split(":")
+    except (KeyError, ValueError):
+        return
+
+    if action == "more":
+        await _handle_more(interaction, table, row_id)
+    elif action == "save":
+        await _handle_save(interaction, table, row_id)
+
+
 async def send_internship(internship, channel, table, type="internship"):
     embed = build_internship_embed(internship, type)
+    view = build_job_view(internship, table)
 
-    message = await channel.send(embed=embed)
+    message = await channel.send(embed=embed, view=view)
 
     await asyncio.to_thread(
         update_internship_message_id, internship["id"], message.id, table
@@ -592,7 +809,8 @@ async def refresh_posted_embeds(kind="internship", progress=None, limit=None,
 
             try:
                 embed = build_internship_embed(row, kind)
-                await message.edit(embed=embed)
+                view = build_job_view(row, table)
+                await message.edit(embed=embed, view=view)
                 stats["edited"] += 1
             except discord.HTTPException as exc:
                 logger.exception("Edit failed for %s msg %s: %s", table, message_id, exc)
@@ -870,6 +1088,21 @@ clearinternships_cmd.register(bot, logger=logger)
 refreshembeds_cmd.register(
     bot, refresh_posted_embeds=refresh_posted_embeds, logger=logger
 )
+
+
+@bot.event
+async def on_interaction(interaction):
+    # Route Show-more/less button clicks. Handling it here (rather than a
+    # registered persistent View) means the buttons keep working across
+    # restarts without re-registering every historical message's View — the
+    # custom_id carries all the state we need.
+    if interaction.type is discord.InteractionType.component:
+        custom_id = (interaction.data or {}).get("custom_id", "")
+        if custom_id.startswith("jobsec:"):
+            try:
+                await handle_section_button(interaction)
+            except Exception:
+                logger.exception("Section button handler failed")
 
 
 @bot.event

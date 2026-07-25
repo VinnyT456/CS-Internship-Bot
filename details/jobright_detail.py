@@ -125,12 +125,16 @@ def _pick_string(*values: object) -> str | None:
 def _from_helper_result(result: dict) -> dict:
     min_k = _annual_to_thousands(result.get("minSalary"))
     max_k = _annual_to_thousands(result.get("maxSalary"))
-    requirements = _unique_strings(result.get("skillSummaries"))
-    requirements.extend(_unique_strings(result.get("educationSummaries")))
-    requirements.extend(_unique_strings(result.get("qualificationSummaries")))
 
-    tags = _unique_strings(result.get("recommendationTags"))
-    tags.extend(_unique_strings(result.get("jobTags")))
+    # skillSummaries is the actual required-skills/qualifications list
+    # ("C#", "Unity", "narrative development") — that's what belongs in Skills.
+    # Requirements keeps the harder gate items (education + qualifications).
+    # jobTags/recommendationTags are marketing noise ("Be an early applicant")
+    # and are dropped.
+    requirements = _unique_strings(result.get("qualificationSummaries"))
+    requirements.extend(_unique_strings(result.get("educationSummaries")))
+
+    skills = _unique_strings(result.get("skillSummaries"))
 
     return {
         "job_summary": _pick_string(result.get("jobSummary"), result.get("description")),
@@ -142,51 +146,14 @@ def _from_helper_result(result: dict) -> dict:
         "salary_desc": _pick_string(result.get("salaryDesc")),
         "employment_type": _pick_string(result.get("employmentType")),
         "seniority": _pick_string(result.get("jobSeniority")),
-        "job_tags": _unique_strings(tags),
+        "job_tags": skills,
         "work_model": _normalize_work_model(result.get("workModel")),
         "job_location": _pick_string(result.get("jobLocation")),
     }
 
 
-def _extract_ld_sections(description: str) -> dict[str, list[str]]:
-    sections: dict[str, list[str]] = {
-        "responsibilities": [],
-        "requirements": [],
-        "benefits": [],
-    }
-
-    if not description:
-        return sections
-
-    soup = BeautifulSoup(description, "html.parser")
-    current = None
-    for node in soup.find_all(["p", "li"]):
-        if node.name == "p":
-            heading = node.get_text(" ", strip=True).rstrip(":").lower()
-            if heading in {"responsibilities", "responsibility"}:
-                current = "responsibilities"
-                continue
-            if heading in {"skills", "qualifications", "requirements", "requirement"}:
-                current = "requirements"
-                continue
-            if heading in {"benefits", "benefit", "perks"}:
-                current = "benefits"
-                continue
-            if heading and current:
-                sections[current].append(node.get_text(" ", strip=True))
-            continue
-
-        if node.name == "li" and current:
-            text = node.get_text(" ", strip=True)
-            if text:
-                sections[current].append(text)
-
-    return sections
-
-
 def _from_ld_json(payload: dict) -> dict:
     description = payload.get("description") or ""
-    sections = _extract_ld_sections(description)
 
     summary = None
     summary_match = re.search(r"^<p>(.*?)</p>", description, re.DOTALL)
@@ -234,20 +201,19 @@ def _from_ld_json(payload: dict) -> dict:
         elif locality:
             location = locality
 
+    # The helper block is authoritative for the structured lists
+    # (responsibilities/requirements/skills). ld+json's HTML section-scrape is
+    # lossy — it swept skill text and the "Company Overview" blurb into
+    # requirements — so we DON'T surface its lists here. ld+json only fills the
+    # scalars the helper can miss: summary, comp, location, employment type.
     return {
         "job_summary": summary,
-        "job_responsibilities": _unique_strings(sections["responsibilities"]),
-        "job_requirements": _unique_strings(sections["requirements"]),
-        "job_benefits": _unique_strings(sections["benefits"]),
         "comp_min": comp_min,
         "comp_max": comp_max,
         "salary_desc": salary_desc,
         "employment_type": str(employment).replace("_", " ").title()
         if employment
         else None,
-        "seniority": None,
-        "job_tags": [],
-        "work_model": None,
         "job_location": location,
     }
 
@@ -261,13 +227,13 @@ def _from_next_data(payload: dict) -> dict:
 
 
 def _merge_details(*details: dict | None) -> dict:
+    # First non-empty source wins per field — for both scalars AND lists.
+    # Sources are passed helper-first; the helper's lists are clean structured
+    # data, while ld+json's section-scraper is lossy (it swept the "Company
+    # Overview" blurb into requirements). Concatenating them polluted the clean
+    # lists, so ld+json/next now only FILL fields the helper left empty rather
+    # than appending to them.
     merged: dict = {}
-    list_fields = {
-        "job_responsibilities",
-        "job_requirements",
-        "job_benefits",
-        "job_tags",
-    }
 
     for detail in details:
         if not detail:
@@ -275,9 +241,7 @@ def _merge_details(*details: dict | None) -> dict:
         for key, value in detail.items():
             if value in (None, "", []):
                 continue
-            if key in list_fields:
-                merged[key] = _unique_strings([*(merged.get(key) or []), *value])
-            elif key not in merged or merged[key] in (None, "", []):
+            if key not in merged or merged[key] in (None, "", []):
                 merged[key] = value
 
     if merged.get("comp_min") and not merged.get("comp_max"):
