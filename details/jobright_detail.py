@@ -122,31 +122,61 @@ def _pick_string(*values: object) -> str | None:
     return None
 
 
+def _qualification_sentences(result: dict) -> list[str]:
+    """Requirement sentences from the 'qualifications' block (must-have +
+    preferred), falling back to the flat *Summaries lists when that block is
+    absent."""
+    qual = result.get("qualifications") or {}
+    sentences = []
+    if isinstance(qual, dict):
+        sentences.extend(_unique_strings(qual.get("mustHave")))
+        sentences.extend(_unique_strings(qual.get("preferredHave")))
+    if sentences:
+        return _unique_strings(sentences)
+
+    # Fallback for pages that lack the structured block.
+    fallback = _unique_strings(result.get("qualificationSummaries"))
+    fallback.extend(_unique_strings(result.get("educationSummaries")))
+    fallback.extend(_unique_strings(result.get("skillSummaries")))
+    return _unique_strings(fallback)
+
+
+def _core_skill_tags(result: dict) -> list[str]:
+    """Short skill tags from jdCoreSkills ('Python', 'C', 'Rust') — the clean
+    chip list. Falls back to skillMatchingScores' displayName."""
+    tags = [
+        s.get("skill")
+        for s in (result.get("jdCoreSkills") or [])
+        if isinstance(s, dict) and s.get("skill")
+    ]
+    if not tags:
+        tags = [
+            s.get("displayName") or s.get("featureName")
+            for s in (result.get("skillMatchingScores") or [])
+            if isinstance(s, dict)
+        ]
+    return _unique_strings(tags)
+
+
 def _from_helper_result(result: dict) -> dict:
     min_k = _annual_to_thousands(result.get("minSalary"))
     max_k = _annual_to_thousands(result.get("maxSalary"))
 
-    # skillSummaries is the actual required-skills/qualifications list
-    # ("C#", "Unity", "narrative development") — that's what belongs in Skills.
-    # Requirements keeps the harder gate items (education + qualifications).
-    # jobTags/recommendationTags are marketing noise ("Be an early applicant")
-    # and are dropped.
-    requirements = _unique_strings(result.get("qualificationSummaries"))
-    requirements.extend(_unique_strings(result.get("educationSummaries")))
-
-    skills = _unique_strings(result.get("skillSummaries"))
-
+    # Skills  = jdCoreSkills (short tags: Python, C, Rust) -> chips
+    # Requirements = qualifications.mustHave + preferredHave (sentences)
+    # What-you'll-do = coreResponsibilities
+    # jobTags/recommendationTags are marketing noise and are dropped.
     return {
         "job_summary": _pick_string(result.get("jobSummary"), result.get("description")),
         "job_responsibilities": _unique_strings(result.get("coreResponsibilities")),
-        "job_requirements": _unique_strings(requirements),
+        "job_requirements": _qualification_sentences(result),
         "job_benefits": _unique_strings(result.get("benefitsSummaries")),
         "comp_min": min_k,
         "comp_max": max_k or min_k,
         "salary_desc": _pick_string(result.get("salaryDesc")),
         "employment_type": _pick_string(result.get("employmentType")),
         "seniority": _pick_string(result.get("jobSeniority")),
-        "job_tags": skills,
+        "job_tags": _core_skill_tags(result),
         "work_model": _normalize_work_model(result.get("workModel")),
         "job_location": _pick_string(result.get("jobLocation")),
     }
@@ -367,6 +397,22 @@ def _parse_html(html: str) -> dict:
     return _merge_details(helper_detail, ld_detail, next_detail)
 
 
+# Every field the detail dict owns. fetch_job_detail guarantees all of these
+# are present (empty when the page has no value) so enrich_job always
+# overwrites stale data instead of leaving a dropped-empty key behind.
+_LIST_FIELDS = ("job_responsibilities", "job_requirements", "job_benefits", "job_tags")
+_SCALAR_FIELDS = (
+    "job_summary",
+    "comp_min",
+    "comp_max",
+    "salary_desc",
+    "employment_type",
+    "seniority",
+    "work_model",
+    "job_location",
+)
+
+
 def fetch_job_detail(job_url: str) -> dict | None:
     normalized = normalize_job_url(job_url)
     if not normalized or "jobright.ai" not in normalized:
@@ -384,6 +430,12 @@ def fetch_job_detail(job_url: str) -> dict | None:
     ):
         # Free: we already have the page, so no second request to decide this.
         detail["is_closed"] = is_html_closed(html)
+        # Fill any field _merge_details dropped for being empty, so callers see
+        # an explicit empty and can clear stale DB values.
+        for key in _LIST_FIELDS:
+            detail.setdefault(key, [])
+        for key in _SCALAR_FIELDS:
+            detail.setdefault(key, None)
         return detail
     return None
 
@@ -401,10 +453,15 @@ def enrich_job(row: dict) -> dict:
 
     enriched = dict(row)
     for key, value in detail.items():
-        if value in (None, [], ""):
-            continue
+        # location / work_model: the scrape's value wins if it had one; the
+        # detail page is only a fallback.
         if key in {"job_location", "work_model"} and enriched.get(key):
             continue
+        # For every other detail-owned field, the detail is authoritative —
+        # take its value EVEN WHEN EMPTY, so a re-enrich clears a field that no
+        # longer applies (e.g. jobright job_tags after skills were rerouted).
+        # A whole failed fetch is handled above (detail is falsy -> return row),
+        # so this only runs when the page really said the field is empty.
         enriched[key] = value
 
     if enriched.get("comp_min") and not enriched.get("comp_max"):

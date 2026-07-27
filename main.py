@@ -1,7 +1,6 @@
 import asyncio
 import gc
 import logging
-import re
 import logging.handlers
 import os
 import random
@@ -45,19 +44,9 @@ CATEGORY_COLORS = {
 }
 
 MESSAGE_SEND_DELAY_SECONDS = 1.2
-# Cap posts per 15-min cycle so a first run against a full table (hundreds of
-# rows) can't post for longer than the loop interval and overlap the next tick.
-# ~1.2s/post × 400 ≈ 8 min, comfortably under 15. Remaining rows stay unsent
-# and carry to the next cycle.
 MAX_POSTS_PER_CYCLE = 400
 
-# Detail-page fetches run concurrently. Kept low: each worker holds a response
-# body, and Render's instance is small. 4 workers ≈ 1 posting/sec end to end,
-# well inside the 15-minute cycle even at the 400-post cap.
 ENRICH_WORKERS = int(os.getenv("ENRICH_WORKERS", "4"))
-# Concurrent message edits during /refreshembeds. Discord's edit rate is ~5/s
-# per channel; discord.py backs off on 429 on its own, so this just caps how
-# many edits are in flight at once.
 REFRESH_CONCURRENCY = int(os.getenv("REFRESH_CONCURRENCY", "5"))
 
 CHANNEL_CACHE = {}
@@ -99,8 +88,6 @@ if not logger.handlers:
 intents = discord.Intents.default()
 intents.members = True  # required for on_member_join
 
-# max_messages=None disables discord.py's 1000-message cache — the bot only
-# posts, never reads messages back, and Render's instance has 512 MB
 bot = commands.Bot(command_prefix="/", intents=intents, max_messages=None)
 app = FastAPI()
 
@@ -120,9 +107,6 @@ def run_web_server():
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
-# Singletons: creating these per task tick leaks httpx connection pools and
-# re-loads clients every 10-15 minutes — a slow memory creep that eventually
-# OOMs Render's 512 MB instance. One instance each, reused forever.
 _scrapers = {}
 _supabase_db = None
 
@@ -154,10 +138,6 @@ NEW_GRAD_SCRAPERS = (JobrightNewGrad, SimplifyNewGrad)
 
 
 def _scrape_all(scraper_classes):
-    # Sequential, not concurrent: each repo's README soup balloons to ~25 MB
-    # during parsing. Running them back-to-back keeps only one soup alive at
-    # a time and frees it (gc) before the next — running them all at once
-    # tripled the peak and OOM'd Render's 512 MB instance.
     for cls in scraper_classes:
         _run_scraper(_get(cls))
         gc.collect()
@@ -174,12 +154,6 @@ def fetch_new_grads():
 
 
 def enrich_rows(rows, table):
-    """Fetch each posting's detail page and persist what comes back.
-
-    Runs on a worker thread (called via asyncio.to_thread) because the
-    enrichers are blocking httpx. Rows whose lookup fails come back
-    unchanged, so a dead detail page only costs us the extra fields.
-    """
     if not rows:
         return []
 
@@ -189,8 +163,6 @@ def enrich_rows(rows, table):
         logger.exception("Detail enrichment failed; posting unenriched rows")
         return rows
     finally:
-        # Drop pooled sockets between cycles rather than holding them open
-        # for the 15 minutes until the next one.
         details.close_http_clients()
         gc.collect()
 
@@ -285,9 +257,6 @@ def format_location(location):
 
 
 def format_location_inline(location, limit=2):
-    """Locations on one line for the header strip: 'Seattle, WA · Austin, TX'
-    with a '+N more' tail. The multi-line bulleted form is too tall for a
-    header, so this is the compact counterpart to format_location()."""
     parts = [loc.strip() for loc in (location or "").split(" | ") if loc.strip()]
     if not parts:
         return None
@@ -299,8 +268,6 @@ def format_location_inline(location, limit=2):
 
 
 def format_posted(value):
-    """'2026-07-25' -> 'Jul 25, 2026'. An ISO date reads like machine output;
-    the human form belongs in a header line. Falls back to the raw value."""
     if not value:
         return None
     try:
@@ -311,8 +278,6 @@ def format_posted(value):
 
 
 def format_bullets(items, limit=3, max_item_len=180):
-    """Top `limit` list entries as bullets, with a '+N more' tail. Each entry
-    is trimmed so one long paragraph can't eat the whole 1024-char field."""
     items = [str(i).strip() for i in (items or []) if str(i).strip()]
     if not items:
         return None
@@ -325,23 +290,39 @@ def format_bullets(items, limit=3, max_item_len=180):
     return truncate_embed_value("\n".join(lines))
 
 
-# How many items each section shows before the single Show-more button
-# reveals the rest.
 SECTION_PREVIEW = 3
+SECTION_PREVIEW_LONG = 2  # when the preview runs tall, show fewer bullets
+SECTION_MAX_LINES = 4     # collapse to 2 bullets once 3 would wrap past this
+WRAP_CHARS = 50           # ~chars per display line on a narrow (mobile) client
 SKILLS_PREVIEW = 6
 
 
-def format_section(items, expanded=False, max_item_len=220):
-    """Blockquote-rendered section for responsibilities/requirements. Discord
-    draws '> ' lines with a colored bar and a touch more spacing, which reads
-    larger and cleaner than plain bullets. Collapsed shows SECTION_PREVIEW
-    items with a hint; expanded shows all (capped to the 1024-char field)."""
+def _wrapped_lines(item):
+    """Estimate how many display lines a bullet wraps to on a narrow client."""
+    return max(1, -(-len(item) // WRAP_CHARS))  # ceil division
+
+
+def _section_preview_count(items):
+    """Show 3 bullets normally, but drop to 2 once the first 3 would wrap past
+    SECTION_MAX_LINES total — so a wall of long text can't dominate the card."""
+    head = items[:SECTION_PREVIEW]
+    total_lines = sum(_wrapped_lines(i) for i in head)
+    if total_lines > SECTION_MAX_LINES:
+        return SECTION_PREVIEW_LONG
+    return SECTION_PREVIEW
+
+
+def format_section(items, expanded=False, max_item_len=200):
+    """'• ' bullets for a section value. The title is the field NAME (bold in
+    Discord), set by the caller. Collapsed shows 2-3 items (fewer when they're
+    long) plus a '+N more' line."""
     items = [str(i).strip() for i in (items or []) if str(i).strip()]
     if not items:
         return None
 
-    shown = items if expanded else items[:SECTION_PREVIEW]
-    lines = [f"> {truncate_embed_value(i, max_item_len)}" for i in shown]
+    preview = _section_preview_count(items)
+    shown = items if expanded else items[:preview]
+    lines = [f"• {truncate_embed_value(i, max_item_len)}" for i in shown]
 
     hidden = len(items) - len(shown)
     if hidden > 0:
@@ -351,41 +332,40 @@ def format_section(items, expanded=False, max_item_len=220):
 
 
 def format_skills(tags, expanded=False):
-    """Skill chips as inline code, collapsed to SKILLS_PREVIEW with a hint."""
+    """Skill chips for a section value. Title is the field name (bold)."""
     tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
     if not tags:
         return None
 
     shown = tags if expanded else tags[:SKILLS_PREVIEW]
-    # Adjacent code chips read as tags; a bullet separator between them adds
-    # visual noise the chip borders already provide.
     text = "  ".join(f"`{t}`" for t in shown)
 
     hidden = len(tags) - len(shown)
     if hidden > 0:
-        # Own line so the italic hint doesn't run into the last chip.
         text += f"\n*+{hidden} more*"
 
     return truncate_embed_value(text, 1018)
 
 
 def job_has_more(internship):
-    """True when any collapsible section overflows its preview — i.e. the one
-    Show-more button is worth showing."""
-    def over(field, preview):
+    def section_over(field):
         items = [i for i in (internship.get(field) or []) if str(i).strip()]
-        return len(items) > preview
+        # Compare against the same preview count the section will actually
+        # render, so a job that collapses to 2 long bullets still gets a button.
+        return len(items) > _section_preview_count([str(i) for i in items])
+
+    def skills_over(field):
+        items = [i for i in (internship.get(field) or []) if str(i).strip()]
+        return len(items) > SKILLS_PREVIEW
 
     return (
-        over("job_responsibilities", SECTION_PREVIEW)
-        or over("job_requirements", SECTION_PREVIEW)
-        or over("job_tags", SKILLS_PREVIEW)
+        section_over("job_responsibilities")
+        or section_over("job_requirements")
+        or skills_over("job_tags")
     )
 
 
 def format_pay(internship):
-    """Prefer the human string the detail page gave; else build one from the
-    annualized-thousands comp range."""
     pay = internship.get("salary_desc")
     if pay:
         return pay
@@ -397,22 +377,10 @@ def format_pay(internship):
 
 
 def _job_type_label(internship, kind):
-    """The posting's own employment type when the detail page gave one
-    ('Full Time', 'Intern', 'Part Time'); otherwise fall back to the channel
-    kind (internship / new grad). Most postings are internships, so the
-    fallback is usually right anyway."""
     return internship.get("employment_type") or str(kind).title()
 
 
 def build_internship_embed(internship, type="internship", expanded=False):
-    """Build the posting embed from a row. Shared by the live post path and
-    the /refreshembeds command so both render identically. Every enrichment
-    block is conditional — a row missing detail columns degrades to the
-    compact form rather than showing blank fields. A row flagged is_closed
-    gets the closed treatment instead.
-
-    expanded: when True, responsibilities/requirements/skills all render in
-    full. The single Show-more button toggles it."""
     if internship.get("is_closed"):
         return build_closed_embed(internship)
 
@@ -429,10 +397,11 @@ def build_internship_embed(internship, type="internship", expanded=False):
     url = internship.get("job_url")
     posted = internship.get("job_posted_at") or "Unknown"
 
-    # Title is the role; the company sits in the author line so the two read
-    # as a clean two-tier header rather than repeating the name.
+    # Top half mirrors the original layout: rocket-prefixed role as the title,
+    # the company as a big '##' header in the description, logo in the author
+    # line. The new enrichment (summary, comp, sections, buttons) hangs below.
     embed = discord.Embed(
-        title=title,
+        title=f"🚀 {title}",
         url=url,
         color=CATEGORY_COLORS.get(category, discord.Color.blurple()),
         timestamp=discord.utils.utcnow(),
@@ -443,10 +412,11 @@ def build_internship_embed(internship, type="internship", expanded=False):
         icon_url=company_logo or BOT_AVATAR_URL,
     )
 
-    # --- Stat grid: code-block boxes, three per row. Only the facts we have;
-    # the last row is padded to a multiple of three so the next section starts
-    # clean. Level was dropped (redundant for an internship board); Type comes
-    # from the posting itself.
+    # Company as the big header, matching the original top half. The summary
+    # prose stays removed (per the earlier request); enriched detail lives in
+    # the sections below.
+    embed.description = f"## {company}"
+
     stats = [
         ("💰 Compensation", format_pay(internship)),
         ("🏢 Work Model", internship.get("work_model")),
@@ -465,37 +435,24 @@ def build_internship_embed(internship, type="internship", expanded=False):
     for _ in range((3 - len(present) % 3) % 3):
         embed.add_field(name="​", value="​", inline=True)
 
-    # --- Responsibilities / requirements as blockquotes (more readable than
-    # cramped bullets); skills as chips. All three collapse together and are
-    # revealed by the single Show-more button in the component row below.
+    # Titles are the field NAMES (Discord renders those bold), content in the
+    # value — cleaner than a '###' heading inside the value.
     responsibilities = format_section(
         internship.get("job_responsibilities"), expanded=expanded
     )
     if responsibilities:
-        embed.add_field(
-            name="📋 What you'll do",
-            value=responsibilities,
-            inline=False,
-        )
+        embed.add_field(name="📋 What you'll do", value=responsibilities, inline=False)
 
     requirements = format_section(
         internship.get("job_requirements"), expanded=expanded
     )
     if requirements:
-        embed.add_field(
-            name="✅ Requirements",
-            value=requirements,
-            inline=False,
-        )
+        embed.add_field(name="✅ Requirements", value=requirements, inline=False)
 
-    # Skills keep the newer chip format (double-space chips + '\n-# +N more').
     skills = format_skills(internship.get("job_tags"), expanded=expanded)
     if skills:
         embed.add_field(name="🏷️ Skills", value=skills, inline=False)
 
-    # Apply is a link button in the component row, not an embed field.
-
-    # --- Links compressed onto one line instead of three separate fields.
     fallback_urls = get_fallback_search_urls(company)
     website = company_website or fallback_urls["website"]
     linkedin = company_linkedin or fallback_urls["linkedin"]
@@ -517,9 +474,6 @@ def build_internship_embed(internship, type="internship", expanded=False):
 
 
 def build_closed_embed(internship):
-    """A muted embed for postings the detail page reported as closed, so an
-    edited-in-place message reads as dead rather than sending members to a
-    broken link."""
     company_info = normalize_company_info(internship.get("company_info"))
     company = (
         company_info.get("company_name")
@@ -552,15 +506,9 @@ def build_closed_embed(internship):
 
 
 # --- Message components (buttons) ---------------------------------------
-# Discord embeds can't hold buttons, so Apply / Show more / Save live as
-# message components. State is stateless-by-custom_id: every click re-reads
-# the row and the current embed, so the buttons survive restarts without a
-# registered persistent View — on_interaction routes jobsec:* clicks.
 
 
 def _fetch_row_for_buttons(table, row_id):
-    """Re-read a single posting (joined with company_info) so a button click
-    rebuilds the exact embed even after a restart."""
     resp = (
         get_db()
         .supabase.table(table)
@@ -572,24 +520,14 @@ def _fetch_row_for_buttons(table, row_id):
     return resp.data[0] if resp.data else None
 
 
-# The collapse hint a section carries only while collapsed: '*+3 more*'.
-_MORE_HINT_RE = re.compile(r"\*\+\d+ more\*")
-
-
-def _is_expanded(embed):
-    """True when the embed is showing sections in full. Detected by the
-    absence of the '*+N more*' overflow hint that only a collapsed section
-    carries."""
-    for field in embed.fields:
-        if _MORE_HINT_RE.search(field.value or ""):
-            return False
-    return True
-
-
-def build_job_view(internship, table, expanded=False):
-    """Component row for a posting: Apply (link) · Show more/less (toggle,
-    only when something overflows) · Save. Always returns a View — Apply and
-    Save are on every post."""
+def build_job_view(internship, table, expanded=False, saved_flash=False):
+    # One row, ordered by UX priority: primary action (Apply) → high-value
+    # resume tools (Score, Tailor) → Save → Show more (least urgent). Discord
+    # caps a row at 5 and auto-sizes each button to its label — there's no
+    # width control, so order + label length are the only levers.
+    #
+    # saved_flash: render the Save button as a green "✅ Saved" for the brief
+    # confirmation flip after a click.
     view = discord.ui.View(timeout=None)
     row_id = internship["id"]
     url = internship.get("job_url")
@@ -601,35 +539,69 @@ def build_job_view(internship, table, expanded=False):
                 style=discord.ButtonStyle.link,
                 url=url,
                 emoji="🟢",
+                row=0,
             )
         )
 
-    if job_has_more(internship):
-        view.add_item(
-            discord.ui.Button(
-                label="Show less" if expanded else "Show more",
-                # Blurple accent — the primary in-message action.
-                style=discord.ButtonStyle.primary,
-                custom_id=f"jobsec:more:{table}:{row_id}",
-                emoji="📄",
-            )
+    # Resume features — wired to the router but not yet backed by real logic;
+    # they reply with a "coming soon" placeholder until the pipeline is built.
+    view.add_item(
+        discord.ui.Button(
+            label="Score",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"jobsec:score:{table}:{row_id}",
+            emoji="📊",
+            row=0,
         )
+    )
+    view.add_item(
+        discord.ui.Button(
+            label="Tailor",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"jobsec:tailor:{table}:{row_id}",
+            emoji="✍️",
+            row=0,
+        )
+    )
 
     view.add_item(
         discord.ui.Button(
-            label="Save",
-            # Grey — the two colored slots (green/blurple) are taken by
-            # Apply/Show more, and red reads as destructive.
-            style=discord.ButtonStyle.secondary,
+            label="Saved" if saved_flash else "Save",
+            style=(
+                discord.ButtonStyle.success
+                if saved_flash
+                else discord.ButtonStyle.secondary
+            ),
             custom_id=f"jobsec:save:{table}:{row_id}",
-            emoji="🔖",
+            emoji="✅" if saved_flash else "🔖",
+            row=0,
         )
     )
+
+    if job_has_more(internship):
+        # The custom_id carries the CURRENT expanded state (1/0) so the handler
+        # can flip it deterministically — no inferring state from the embed
+        # text, which was fragile and made bullets flicker on toggle.
+        view.add_item(
+            discord.ui.Button(
+                label="Less" if expanded else "More",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"jobsec:more:{table}:{row_id}:{1 if expanded else 0}",
+                emoji="📄",
+                row=0,
+            )
+        )
 
     return view
 
 
-async def _handle_more(interaction, table, row_id):
+async def _handle_more(interaction, table, row_id, currently_expanded):
+    # Guard against a double-dispatch (Discord can deliver the same component
+    # interaction more than once): if it's already been acknowledged, bail
+    # rather than calling response.* twice and hitting 40060.
+    if interaction.response.is_done():
+        return
+
     row = await asyncio.to_thread(_fetch_row_for_buttons, table, int(row_id))
     if not row:
         await interaction.response.send_message(
@@ -637,55 +609,157 @@ async def _handle_more(interaction, table, row_id):
         )
         return
 
-    expanded = not _is_expanded(interaction.message.embeds[0])
+    # Flip the state the button was rendered with — deterministic, no parsing
+    # the embed.
+    expanded = not currently_expanded
     embed = build_internship_embed(row, expanded=expanded)
     view = build_job_view(row, table, expanded=expanded)
     await interaction.response.edit_message(embed=embed, view=view)
 
 
+SAVE_FLASH_SECONDS = 2
+
+
+def _rebuild_view_from_message(message, table, row_id, expanded, saved_flash):
+    """Rebuild the button row from the message's OWN components — link buttons
+    keep their url, custom_id buttons keep their id — flipping only the Save
+    button's label/style. No DB fetch, so the interaction ack stays well under
+    Discord's 3s deadline."""
+    view = discord.ui.View(timeout=None)
+    for comp_row in getattr(message, "components", []):
+        for comp in getattr(comp_row, "children", []):
+            if getattr(comp, "type", None) != discord.ComponentType.button:
+                continue
+            cid = getattr(comp, "custom_id", None)
+            is_save = bool(cid) and ":save:" in cid
+
+            if getattr(comp, "url", None):
+                view.add_item(
+                    discord.ui.Button(
+                        label=comp.label,
+                        style=discord.ButtonStyle.link,
+                        url=comp.url,
+                        emoji=comp.emoji,
+                        row=0,
+                    )
+                )
+            elif is_save:
+                view.add_item(
+                    discord.ui.Button(
+                        label="Saved" if saved_flash else "Save",
+                        style=(
+                            discord.ButtonStyle.success
+                            if saved_flash
+                            else discord.ButtonStyle.secondary
+                        ),
+                        custom_id=cid,
+                        emoji="✅" if saved_flash else "🔖",
+                        row=0,
+                    )
+                )
+            else:
+                view.add_item(
+                    discord.ui.Button(
+                        label=comp.label,
+                        style=comp.style,
+                        custom_id=cid,
+                        emoji=comp.emoji,
+                        row=0,
+                    )
+                )
+    return view
+
+
 async def _handle_save(interaction, table, row_id):
-    user = interaction.user
-    db = get_db()
-    user_uuid = await asyncio.to_thread(
-        db.get_or_create_user, user.id, user.name, user.display_name
-    )
-    if not user_uuid:
-        await interaction.response.send_message(
-            "Couldn't save right now — try again later.", ephemeral=True
-        )
+    if interaction.response.is_done():
         return
 
-    saved = await asyncio.to_thread(
-        db.toggle_saved_job, user_uuid, table, int(row_id)
+    # ACK FIRST, with NO DB work before it — Discord expires a component
+    # interaction after 3s. Rebuild the button row from the message's own
+    # components (no fetch) and flip Save -> "✅ Saved"; this edit is the ack.
+    expanded = _current_expanded(interaction.message)
+    flashed = _rebuild_view_from_message(
+        interaction.message, table, row_id, expanded, saved_flash=True
     )
-    if saved is None:
-        await interaction.response.send_message(
-            "Couldn't save right now — try again later.", ephemeral=True
+    try:
+        await interaction.response.edit_message(view=flashed)
+    except discord.HTTPException:
+        logger.exception("Failed acking Save click")
+        return
+
+    # Interaction is acknowledged — safe to hit the DB now.
+    user = interaction.user
+    db = get_db()
+    try:
+        user_uuid = await asyncio.to_thread(
+            db.get_or_create_user, user.id, user.name, user.display_name
         )
-    elif saved:
-        await interaction.response.send_message(
-            "🔖 Saved. Find it in your saved jobs.", ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            "Removed from your saved jobs.", ephemeral=True
-        )
+        if user_uuid:
+            await asyncio.to_thread(
+                db.toggle_saved_job, user_uuid, table, int(row_id)
+            )
+    except Exception:
+        logger.exception("Save DB write failed for %s %s", table, row_id)
+
+    # Revert the button label after the flash window.
+    await asyncio.sleep(SAVE_FLASH_SECONDS)
+    normal = _rebuild_view_from_message(
+        interaction.message, table, row_id, expanded, saved_flash=False
+    )
+    try:
+        await interaction.edit_original_response(view=normal)
+    except discord.HTTPException:
+        logger.exception("Failed reverting Save button flash")
+
+
+def _current_expanded(message):
+    """Read the expand state off the message's More/Less button custom_id
+    (…:more:table:id:<0|1>). Defaults to collapsed if not found."""
+    for row in getattr(message, "components", []):
+        for comp in getattr(row, "children", []):
+            cid = getattr(comp, "custom_id", "") or ""
+            if ":more:" in cid:
+                return cid.rsplit(":", 1)[-1] == "1"
+    return False
+
+
+async def _handle_score(interaction, table, row_id):
+    # Placeholder — the résumé-vs-posting scoring pipeline isn't built yet.
+    # Wire the real logic here (fetch the user's résumé, compare against this
+    # posting's requirements/skills, return a match score).
+    if interaction.response.is_done():
+        return
+    await interaction.response.send_message(
+        "📊 Resume scoring is coming soon.", ephemeral=True
+    )
+
+
+async def _handle_tailor(interaction, table, row_id):
+    # Placeholder — résumé tailoring isn't built yet. Wire the real logic here
+    # (take the user's résumé + this posting, return a tailored version).
+    if interaction.response.is_done():
+        return
+    await interaction.response.send_message(
+        "✍️ Resume tailoring is coming soon.", ephemeral=True
+    )
 
 
 async def handle_section_button(interaction):
-    """Router for jobsec:* button clicks, dispatched from on_interaction.
-
-    custom_id shape: jobsec:<action>:<table>:<row_id>
-    """
-    try:
-        _prefix, action, table, row_id = interaction.data["custom_id"].split(":")
-    except (KeyError, ValueError):
+    # custom_id: jobsec:more:<table>:<id>:<0|1>  or  jobsec:save:<table>:<id>
+    parts = interaction.data.get("custom_id", "").split(":")
+    if len(parts) < 4:
         return
+    action, table, row_id = parts[1], parts[2], parts[3]
 
     if action == "more":
-        await _handle_more(interaction, table, row_id)
+        currently_expanded = len(parts) > 4 and parts[4] == "1"
+        await _handle_more(interaction, table, row_id, currently_expanded)
     elif action == "save":
         await _handle_save(interaction, table, row_id)
+    elif action == "score":
+        await _handle_score(interaction, table, row_id)
+    elif action == "tailor":
+        await _handle_tailor(interaction, table, row_id)
 
 
 async def send_internship(internship, channel, table, type="internship"):
@@ -709,15 +783,12 @@ async def _post_batch(rows, channel, kind, table):
         )
         rows = rows[:MAX_POSTS_PER_CYCLE]
 
-    # Enrich after the cap so we only pay for detail pages we're about to post.
     rows = await asyncio.to_thread(enrich_rows, rows, table)
 
     for internship in rows:
         internship_id = internship.get("id", "unknown")
 
         try:
-            # The detail page said the posting is gone. Burn the row rather
-            # than send members to a dead link.
             if internship.get("is_closed"):
                 logger.info("Skipping closed %s %s", kind, internship_id)
                 await asyncio.to_thread(
@@ -746,7 +817,6 @@ async def _post_batch(rows, channel, kind, table):
             logger.exception("Failed sending %s %s", kind, internship_id)
 
 
-# (table -> channel cache key, channel id) for the refresh command.
 REFRESH_TARGETS = (
     ("internships", "internships", INTERNSHIPS_CHANNEL_ID),
     ("new_grads", "new_grads", NEW_GRADS_CHANNEL_ID),
@@ -755,18 +825,6 @@ REFRESH_TARGETS = (
 
 async def refresh_posted_embeds(kind="internship", progress=None, limit=None,
                                 only_table=None):
-    """Re-render already-posted messages in place with the current (enriched)
-    embed. Fetches each row's stored discord_message_id, rebuilds the embed,
-    and edits the message. Missing messages (deleted by hand) are skipped and
-    their message_id cleared so we don't retry them next run.
-
-    limit: cap the TOTAL messages touched across both tables (None = all).
-        Lets you test on a handful before committing to the full ~1300-edit,
-        ~26-minute run.
-    only_table: restrict to "internships" or "new_grads" (None = both).
-    progress: optional async callable(done, total, table) for live updates.
-    Returns a stats dict.
-    """
     stats = {"edited": 0, "skipped_missing": 0, "failed": 0, "total": 0}
 
     db = get_db()
@@ -784,10 +842,6 @@ async def refresh_posted_embeds(kind="internship", progress=None, limit=None,
         if remaining is not None:
             remaining -= len(rows or [])
 
-    # Concurrency cap: discord.py handles per-route 429 backoff internally, so
-    # instead of a fixed sleep we fan out and let this bound in-flight edits.
-    # ~5 concurrent stays under Discord's edit rate and cuts a 1300-message run
-    # from ~26 min to ~5-6 min.
     semaphore = asyncio.Semaphore(REFRESH_CONCURRENCY)
     counter = {"done": 0}
 
@@ -857,7 +911,6 @@ async def check_new_internships():
     elapsed = time.perf_counter() - start
     logger.info("✅ Scrape completed in %.2f seconds", elapsed)
 
-    # Return scrape-cycle allocations
     gc.collect()
 
 
@@ -897,14 +950,10 @@ async def check_new_grads():
 async def before_new_grad_check():
     await bot.wait_until_ready()
     logger.info("Waiting to start new grads check")
-    # Offset from the internship loop so the two scrape batches never run
-    # (and hold their README soups) at the same time.
     await asyncio.sleep(90)
 
 
-# Silver Wolf sees the universe as one big immersive sim — internship
-# hunting is just another quest line to her. Greeting variants are index-
-# aligned across languages so the language toggle keeps the same variant.
+
 WELCOME_L10N = {
     "en": {
         "author": "Silver Wolf",
@@ -1045,7 +1094,6 @@ async def send_welcome(member):
 
     message = await channel.send(embed=embed)
 
-    # Silver Wolf's reaction to a new spawn.
     for emoji in ("👾", "🎮", "💜"):
         await message.add_reaction(emoji)
         await asyncio.sleep(0.35)
@@ -1059,9 +1107,6 @@ async def on_member_join(member):
         logger.exception("Failed sending welcome message for member %s", member.id)
 
 
-# Discord's own "X joined the server" system line is posted separately from
-# on_member_join (in the guild's system channel), so we catch it here and
-# delete it — Silver Wolf's embed is the only welcome we want to show.
 @bot.event
 async def on_message(message):
     if message.type is discord.MessageType.new_member:
@@ -1076,13 +1121,9 @@ async def on_message(message):
             logger.exception("Failed deleting system join message")
         return
 
-    # Keep prefix/other message handling working (slash commands don't need
-    # this, but drop-through is the safe default if any get added later).
     await bot.process_commands(message)
 
 
-# Slash commands live in the commands/ package; register them here with the
-# deps each needs from this module.
 testwelcome_cmd.register(bot, send_welcome=send_welcome, logger=logger)
 clearinternships_cmd.register(bot, logger=logger)
 refreshembeds_cmd.register(
@@ -1091,11 +1132,7 @@ refreshembeds_cmd.register(
 
 
 @bot.event
-async def on_interaction(interaction):
-    # Route Show-more/less button clicks. Handling it here (rather than a
-    # registered persistent View) means the buttons keep working across
-    # restarts without re-registering every historical message's View — the
-    # custom_id carries all the state we need.
+async def on_interaction(interaction):  
     if interaction.type is discord.InteractionType.component:
         custom_id = (interaction.data or {}).get("custom_id", "")
         if custom_id.startswith("jobsec:"):
@@ -1117,12 +1154,6 @@ async def on_ready():
     except Exception:
         logger.exception("Failed caching Discord channels")
 
-    # Sync commands once per process. Re-syncing on every reconnect can trigger
-    # Discord rate limits quickly.
-    #
-    # Guild-scoped only: guild sync is instant, and registering the same
-    # commands both globally and per-guild makes Discord list them twice.
-    # The empty global sync below removes previously-registered global copies.
     if not COMMANDS_SYNCED:
         try:
             for guild in bot.guilds:

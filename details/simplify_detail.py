@@ -215,10 +215,9 @@ def _location(posting: dict) -> str | None:
 
 
 def _tags(posting: dict) -> list[str]:
+    # Skills = the qualification tags only. 'functions' (job categories like
+    # "Full-Stack Engineering") is dropped — it's taxonomy, not a skill.
     tags = [s.get("name") for s in (posting.get("skills") or []) if isinstance(s, dict)]
-    tags.extend(
-        f.get("title") for f in (posting.get("functions") or []) if isinstance(f, dict)
-    )
     return _unique_strings(tags)
 
 
@@ -377,12 +376,14 @@ def enrich_job(row: dict) -> dict:
 
     enriched = dict(row)
     for key, value in detail.items():
-        if value in (None, [], ""):
-            continue
         # The README already gave us a location; the detail page's version is
-        # only a fallback. Same for anything else the scrape filled in.
+        # only a fallback.
         if key == "job_location" and enriched.get(key):
             continue
+        # Otherwise the detail is authoritative for its own fields — take the
+        # value even when empty, so a re-enrich clears a field that no longer
+        # applies rather than leaving stale data behind. A whole failed fetch
+        # returns above, so an empty here means the page really has no value.
         enriched[key] = value
 
     if enriched.get("comp_min") and not enriched.get("comp_max"):

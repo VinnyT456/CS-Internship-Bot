@@ -409,16 +409,31 @@ class SupabaseDatabase:
         "job_location",
     )
 
-    def update_job_details(self, internship_id, details, table=None):
-        """Persist enrichment onto an existing row. Empty values are dropped
-        so a failed lookup never blanks out data the scrape already had."""
+    def update_job_details(self, internship_id, details, table=None, replace=False):
+        """Persist enrichment onto an existing row.
+
+        Default: empty values are dropped, so a failed lookup never blanks out
+        data the scrape already had.
+
+        replace=True: write every detail column present in `details`, including
+        empties — used by the force backfill so a field that's now legitimately
+        empty (e.g. jobright Skills after the reroute) clears its stale value
+        instead of persisting. Requires the enrichment actually succeeded
+        (details carries a job_summary); the caller guards that."""
         table = table or self.internships_table
 
-        payload = {
-            key: value
-            for key, value in details.items()
-            if key in self.DETAIL_COLUMNS and value not in (None, "", [])
-        }
+        if replace:
+            payload = {
+                key: details.get(key)
+                for key in self.DETAIL_COLUMNS
+                if key in details
+            }
+        else:
+            payload = {
+                key: value
+                for key, value in details.items()
+                if key in self.DETAIL_COLUMNS and value not in (None, "", [])
+            }
         if not payload:
             return []
 
