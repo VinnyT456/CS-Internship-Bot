@@ -263,6 +263,50 @@ class SupabaseDatabase:
             self.logger.exception("Failed fetching posted rows from %s", table)
             return []
 
+    def get_rows_to_recheck(self, table=None, limit=150):
+        """Posted-and-open rows that have a detail page to check, oldest-checked
+        first (NULLs — never checked — come first). The rolling closed-status
+        sweep pulls a slice each cycle so no single run scans the whole table."""
+        table = table or self.internships_table
+        try:
+            response = (
+                self.supabase.table(table)
+                .select("id,discord_message_id,detail_url")
+                .not_.is_("discord_message_id", "null")
+                .not_.is_("detail_url", "null")
+                .eq("is_closed", False)
+                .order("last_checked_at", desc=False, nullsfirst=True)
+                .limit(limit)
+                .execute()
+            )
+            return response.data or []
+        except Exception:
+            self.logger.exception("Failed fetching recheck rows from %s", table)
+            return []
+
+    def mark_checked(self, ids, table=None):
+        """Stamp last_checked_at=now() on a batch of rows so they rotate to the
+        back of the recheck queue."""
+        if not ids:
+            return
+        table = table or self.internships_table
+        try:
+            self.supabase.table(table).update(
+                {"last_checked_at": datetime.now(timezone.utc).isoformat()}
+            ).in_("id", ids).execute()
+        except Exception:
+            self.logger.exception("Failed stamping last_checked_at on %s", table)
+
+    def mark_closed(self, internship_id, table=None):
+        """Flag a posting closed (found dead during the recheck sweep)."""
+        table = table or self.internships_table
+        try:
+            self.supabase.table(table).update({"is_closed": True}).eq(
+                "id", internship_id
+            ).execute()
+        except Exception:
+            self.logger.exception("Failed marking %s %s closed", table, internship_id)
+
     def get_existing_internships(self, table=None):
         table = table or self.internships_table
         try:

@@ -49,6 +49,12 @@ MAX_POSTS_PER_CYCLE = 400
 ENRICH_WORKERS = int(os.getenv("ENRICH_WORKERS", "4"))
 REFRESH_CONCURRENCY = int(os.getenv("REFRESH_CONCURRENCY", "5"))
 
+# Rolling closed-status sweep: each 30-min tick re-checks the oldest-checked
+# CLOSED_CHECK_BATCH posted-open rows (2 workers keeps it light on the 512 MB
+# instance). Closed postings get their message edited to the closed embed.
+CLOSED_CHECK_BATCH = int(os.getenv("CLOSED_CHECK_BATCH", "150"))
+CLOSED_CHECK_WORKERS = int(os.getenv("CLOSED_CHECK_WORKERS", "2"))
+
 CHANNEL_CACHE = {}
 SEARCH_URL_CACHE = {}
 BOT_AVATAR_URL = None
@@ -887,6 +893,104 @@ async def refresh_posted_embeds(kind="internship", progress=None, limit=None,
     return stats
 
 
+def _check_closed_batch(rows):
+    """Concurrently check a batch of rows for closure. Returns a list of
+    (row, is_closed) where is_closed is True/False/None (None = undetermined,
+    leave the row alone). Blocking httpx, so run via asyncio.to_thread."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def check(row):
+        return row, details.check_job_closed(row.get("detail_url"))
+
+    try:
+        with ThreadPoolExecutor(max_workers=CLOSED_CHECK_WORKERS) as pool:
+            results = list(pool.map(check, rows))
+    finally:
+        details.close_http_clients()
+        gc.collect()
+    return results
+
+
+CLOSED_CHECK_TARGETS = (
+    ("internships", "internships", INTERNSHIPS_CHANNEL_ID),
+    ("new_grads", "new_grads", NEW_GRADS_CHANNEL_ID),
+)
+
+
+async def sweep_closed_status():
+    """Rolling closed-status sweep. Each run re-checks the oldest-checked
+    posted-open rows; any found closed get their DB row flagged and their
+    Discord message edited to the closed embed."""
+    db = get_db()
+
+    for table, cache_key, channel_id in CLOSED_CHECK_TARGETS:
+        rows = await asyncio.to_thread(
+            db.get_rows_to_recheck, table, CLOSED_CHECK_BATCH
+        )
+        if not rows:
+            continue
+
+        results = await asyncio.to_thread(_check_closed_batch, rows)
+
+        closed_rows = [row for row, is_closed in results if is_closed is True]
+        logger.info(
+            "Closed-check %s: %d checked, %d newly closed",
+            table, len(results), len(closed_rows),
+        )
+
+        channel = await get_cached_channel(cache_key, channel_id)
+        for row in closed_rows:
+            await asyncio.to_thread(db.mark_closed, row["id"], table)
+            message_id = row.get("discord_message_id")
+            if not message_id:
+                continue
+            try:
+                message = await channel.fetch_message(int(message_id))
+                # Re-fetch the full row so the closed embed shows title/company.
+                full = await asyncio.to_thread(
+                    _fetch_row_for_buttons, table, row["id"]
+                )
+                embed = build_closed_embed(full or row)
+                # No buttons on a dead posting.
+                await message.edit(embed=embed, view=None)
+            except discord.NotFound:
+                # Message was deleted by hand — clear the stale id.
+                await asyncio.to_thread(
+                    update_internship_message_id, row["id"], None, table
+                )
+            except discord.HTTPException:
+                logger.exception(
+                    "Failed editing closed message %s in %s", message_id, table
+                )
+            await asyncio.sleep(MESSAGE_SEND_DELAY_SECONDS)
+
+        # Stamp every row we checked (open or closed) so it rotates to the back.
+        await asyncio.to_thread(
+            db.mark_checked, [row["id"] for row, _ in results], table
+        )
+
+
+@tasks.loop(minutes=30)
+async def check_closed_status():
+    logger.info("=" * 60)
+    logger.info("🔎 Starting closed-status sweep")
+    start = time.perf_counter()
+    try:
+        await sweep_closed_status()
+    except Exception:
+        logger.exception("❌ Closed-status sweep failed")
+    logger.info("✅ Closed-status sweep done in %.1fs", time.perf_counter() - start)
+    gc.collect()
+
+
+@check_closed_status.before_loop
+async def before_closed_check():
+    await bot.wait_until_ready()
+    # Offset from both scrape loops so the three don't run at once on the small
+    # instance.
+    await asyncio.sleep(300)
+
+
 @tasks.loop(minutes=15)
 async def check_new_internships():
     start = time.perf_counter()
@@ -1171,6 +1275,9 @@ async def on_ready():
 
     if not check_new_grads.is_running():
         check_new_grads.start()
+
+    if not check_closed_status.is_running():
+        check_closed_status.start()
 
     logger.info("Bot ready as %s", bot.user)
 

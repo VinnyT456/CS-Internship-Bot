@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS public.internships (
     sent_to_discord BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     discord_message_id BIGINT,
+    last_checked_at TIMESTAMPTZ,
 
     -- Coarse backstop; the app dedups on (company, title, normalized
     -- location) since the same job appears under different aggregator URLs.
@@ -89,6 +90,7 @@ CREATE TABLE IF NOT EXISTS public.new_grads (
     sent_to_discord BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     discord_message_id BIGINT,
+    last_checked_at TIMESTAMPTZ,
 
     -- Coarse backstop; the app dedups on (company, title, normalized
     -- location) since the same job appears under different aggregator URLs.
