@@ -107,15 +107,17 @@ CREATE TABLE IF NOT EXISTS public.users (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Uploaded resumes; the file lives in storage, parsed_text holds the extract.
+-- Uploaded resumes. Users upload a PDF (pdf_path); the bot rasterizes it to a
+-- single stacked PNG (image_path) in the Resumes bucket — the image is what the
+-- vision model (Gemma) reads. One current resume per user (UNIQUE user_id);
+-- re-upload overwrites.
 CREATE TABLE IF NOT EXISTS public.resumes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL
+    user_id UUID NOT NULL UNIQUE
         REFERENCES users(id),
-    storage_path TEXT NOT NULL,
+    pdf_path TEXT NOT NULL,
+    image_path TEXT NOT NULL,
     original_filename TEXT NOT NULL,
-    mime_type TEXT NOT NULL,
-    parsed_text TEXT,
     uploaded_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -134,6 +136,21 @@ CREATE TABLE IF NOT EXISTS public.saved_jobs (
     UNIQUE (user_id, job_table, job_id)
 );
 
+-- Alert subscriptions. A user can have several rows (e.g. one per category,
+-- one keyword). A new scraped job is DM'd to a subscriber when it matches their
+-- category (if set) AND their keyword (if set) — both null means "everything".
+CREATE TABLE IF NOT EXISTS public.subscriptions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL
+        REFERENCES users(id),
+    discord_id BIGINT NOT NULL,     -- denormalized so the DM hook needn't join
+    category TEXT,                  -- job_type filter, or NULL for any
+    keyword TEXT,                   -- matched against company/title, or NULL
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (user_id, category, keyword)
+);
+
 ALTER TABLE IF EXISTS public.company_info DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.internships DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.new_grads DISABLE ROW LEVEL SECURITY;
@@ -141,3 +158,4 @@ ALTER TABLE IF EXISTS public.repo_info DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.users DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.resumes DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.saved_jobs DISABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS public.subscriptions DISABLE ROW LEVEL SECURITY;

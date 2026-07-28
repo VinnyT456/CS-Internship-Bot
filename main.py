@@ -24,6 +24,15 @@ from new_grads.simplify_new_grad import SimplifyNewGrad
 from commands import testwelcome as testwelcome_cmd
 from commands import clearinternships as clearinternships_cmd
 from commands import refreshembeds as refreshembeds_cmd
+from commands import latest as latest_cmd
+from commands import search as search_cmd
+from commands import saved as saved_cmd
+from commands import stats as stats_cmd
+from commands import help_command as help_cmd
+from commands import resume as resume_cmd
+from commands import ai_commands as ai_cmd
+from commands import profile as profile_cmd
+from commands import subscribe as subscribe_cmd
 
 
 load_dotenv()
@@ -779,6 +788,48 @@ async def send_internship(internship, channel, table, type="internship"):
     )
 
 
+def _sub_matches(sub, internship):
+    """A subscription matches a job when its category (if set) equals the job's
+    category AND its keyword (if set) appears in the company or title."""
+    cat = sub.get("category")
+    if cat and cat != (internship.get("job_type") or ""):
+        return False
+    kw = (sub.get("keyword") or "").strip().lower()
+    if kw:
+        haystack = (
+            f"{internship.get('company_name', '')} {internship.get('job_title', '')}"
+        ).lower()
+        if kw not in haystack:
+            return False
+    return True
+
+
+async def notify_subscribers(internship, table, kind):
+    """DM subscribers whose filters match this newly-posted job. Best-effort:
+    a blocked DM or a bad id is logged and skipped."""
+    subs = await asyncio.to_thread(get_db().get_all_subscriptions)
+    if not subs:
+        return
+
+    matched = [s for s in subs if _sub_matches(s, internship)]
+    if not matched:
+        return
+
+    embed = build_internship_embed(internship, kind)
+    for sub in matched:
+        try:
+            user = await bot.fetch_user(int(sub["discord_id"]))
+            await user.send(
+                content=f"🔔 New match for your **{sub.get('category') or 'alert'}** subscription:",
+                embed=embed,
+            )
+            await asyncio.sleep(0.5)  # gentle on the DM rate limit
+        except (discord.Forbidden, discord.NotFound):
+            continue  # DMs closed or user gone — skip
+        except Exception:
+            logger.exception("Failed DMing subscriber %s", sub.get("discord_id"))
+
+
 async def _post_batch(rows, channel, kind, table):
     logger.info("Found %s unsent %s", len(rows), kind)
 
@@ -807,6 +858,9 @@ async def _post_batch(rows, channel, kind, table):
             await asyncio.to_thread(
                 mark_internship_as_sent, internship["id"], table
             )
+
+            # Best-effort alert DMs to matching subscribers.
+            await notify_subscribers(internship, table, kind)
 
             await asyncio.sleep(MESSAGE_SEND_DELAY_SECONDS)
 
@@ -1233,6 +1287,21 @@ clearinternships_cmd.register(bot, logger=logger)
 refreshembeds_cmd.register(
     bot, refresh_posted_embeds=refresh_posted_embeds, logger=logger
 )
+latest_cmd.register(
+    bot, build_embed=build_internship_embed, get_db=get_db, logger=logger
+)
+search_cmd.register(
+    bot, build_embed=build_internship_embed, get_db=get_db, logger=logger
+)
+saved_cmd.register(
+    bot, build_embed=build_internship_embed, get_db=get_db, logger=logger
+)
+stats_cmd.register(bot, get_db=get_db, logger=logger)
+help_cmd.register(bot)
+resume_cmd.register(bot, get_db=get_db, logger=logger)
+ai_cmd.register(bot, get_db=get_db, logger=logger)
+profile_cmd.register(bot, get_db=get_db, logger=logger)
+subscribe_cmd.register(bot, get_db=get_db, logger=logger)
 
 
 @bot.event

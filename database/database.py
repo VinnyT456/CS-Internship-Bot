@@ -66,6 +66,107 @@ class SupabaseDatabase:
             self.logger.exception("Failed get_or_create_user for %s", discord_id)
             return None
 
+    def add_subscription(self, user_uuid, discord_id, category=None, keyword=None):
+        """Create an alert subscription. Returns the row, or None on error.
+        (category, keyword) both None means 'every new job'."""
+        try:
+            row = {
+                "user_id": user_uuid,
+                "discord_id": discord_id,
+                "category": category,
+                "keyword": (keyword or None),
+            }
+            resp = (
+                self.supabase.table("subscriptions")
+                .upsert(row, on_conflict="user_id,category,keyword")
+                .execute()
+            )
+            return resp.data[0] if resp.data else None
+        except Exception:
+            self.logger.exception("Failed adding subscription for %s", user_uuid)
+            return None
+
+    def get_subscriptions(self, user_uuid):
+        try:
+            return (
+                self.supabase.table("subscriptions")
+                .select("*")
+                .eq("user_id", user_uuid)
+                .order("created_at", desc=False)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            self.logger.exception("Failed fetching subscriptions for %s", user_uuid)
+            return []
+
+    def delete_subscription(self, sub_id):
+        try:
+            self.supabase.table("subscriptions").delete().eq("id", sub_id).execute()
+            return True
+        except Exception:
+            self.logger.exception("Failed deleting subscription %s", sub_id)
+            return False
+
+    def get_all_subscriptions(self):
+        """Every subscription (for the DM-on-new-job hook). Small table."""
+        try:
+            return (
+                self.supabase.table("subscriptions").select("*").execute().data or []
+            )
+        except Exception:
+            self.logger.exception("Failed fetching all subscriptions")
+            return []
+
+    def get_saved_jobs(self, user_uuid):
+        """The user's saved postings, newest-saved first, each as a full job
+        row (joined with company_info) plus a _job_table marker. Fetches the
+        saved_jobs rows, then the job rows per table in one query each."""
+        try:
+            saves = (
+                self.supabase.table(self.saved_jobs_table)
+                .select("job_table,job_id,saved_at")
+                .eq("user_id", user_uuid)
+                .order("saved_at", desc=True)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            self.logger.exception("Failed fetching saved_jobs for %s", user_uuid)
+            return []
+
+        if not saves:
+            return []
+
+        # Group the wanted ids by table, then one select per table.
+        by_table = {}
+        order = []  # preserve saved_at order
+        for s in saves:
+            by_table.setdefault(s["job_table"], []).append(s["job_id"])
+            order.append((s["job_table"], s["job_id"]))
+
+        rows_by_key = {}
+        for table, ids in by_table.items():
+            try:
+                data = (
+                    self.supabase.table(table)
+                    .select("*, company_info(*)")
+                    .in_("id", ids)
+                    .execute()
+                    .data
+                    or []
+                )
+                for row in data:
+                    row["_job_table"] = table
+                    rows_by_key[(table, row["id"])] = row
+            except Exception:
+                self.logger.exception("Failed fetching saved job rows from %s", table)
+
+        # Return in saved_at order, skipping any that no longer exist.
+        return [rows_by_key[key] for key in order if key in rows_by_key]
+
     def toggle_saved_job(self, user_uuid, job_table, job_id):
         """Save the job if not saved, unsave it if already saved. Returns True
         when it ends up saved, False when unsaved, None on error."""

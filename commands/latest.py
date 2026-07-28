@@ -1,115 +1,73 @@
+import logging
+
 import discord
-from discord.ext import commands
+
+from commands._browser import JobBrowser
 
 
-# Example internship data
-internships = [
-    {
-        "company": "Google",
-        "role": "Software Engineer Intern",
-        "location": "Mountain View, CA",
-        "category": "Software Engineering",
-        "apply_url": "https://careers.google.com",
-    },
-    {
-        "company": "NVIDIA",
-        "role": "AI Software Intern",
-        "location": "Santa Clara, CA",
-        "category": "AI / ML",
-        "apply_url": "https://nvidia.com/careers",
-    },
-    {
-        "company": "Jane Street",
-        "role": "Quantitative Research Intern",
-        "location": "New York, NY",
-        "category": "Quant",
-        "apply_url": "https://janestreet.com",
-    },
-]
+LATEST_LIMIT = 10
 
 
-# Create Embed
-def create_internship_embed(internship, index):
-
-    embed = discord.Embed(
-        title=internship["company"],
-        description=f"**{internship['role']}**",
-        color=discord.Color.blue(),
-    )
-
-    embed.add_field(name="📍 Location", value=internship["location"], inline=True)
-
-    embed.add_field(name="💼 Category", value=internship["category"], inline=True)
-
-    embed.set_footer(text=f"Internship {index + 1}/{len(internships)}")
-
-    return embed
-
-
-# Button View
-class InternshipView(discord.ui.View):
-    def __init__(self, internships):
-        super().__init__(timeout=300)
-
-        self.internships = internships
-        self.index = 0
-
-    # Previous Button
-    @discord.ui.button(
-        label="Previous", 
-        emoji="⬅️", 
-        style=discord.ButtonStyle.secondary
-    )
-    async def previous(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-
-        self.index -= 1
-
-        if self.index < 0:
-            self.index = len(self.internships) - 1
-
-        embed = create_internship_embed(self.internships[self.index], self.index)
-
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(
-        label="Apply",
-        emoji="🚀",
-        style=discord.ButtonStyle.success,
-    )
-    async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        internship = self.internships[self.index]
-
-        await interaction.response.send_message(
-            f"Application link: {internship['apply_url']}", ephemeral=True
+def _fetch_latest(db, table, limit=LATEST_LIMIT):
+    """The newest open, enriched rows from `table` (internships | new_grads) —
+    joined with company_info so the rich embed has logo/website/linkedin.
+    Newest posted first."""
+    try:
+        response = (
+            db.supabase.table(table)
+            .select("*, company_info(*)")
+            .eq("is_closed", False)
+            .not_.is_("job_summary", "null")
+            .order("job_posted_at", desc=True)
+            .limit(limit)
+            .execute()
         )
-
-    # Next Button
-    @discord.ui.button(label="Next", emoji="➡️", style=discord.ButtonStyle.secondary)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        self.index += 1
-
-        if self.index >= len(self.internships):
-            self.index = 0
-
-        embed = create_internship_embed(self.internships[self.index], self.index)
-
-        await interaction.response.edit_message(embed=embed, view=self)
+        return response.data or []
+    except Exception:
+        logging.getLogger("cs_internship_bot").exception("Failed fetching latest")
+        return []
 
 
-def register(bot):
-    # Slash Command
+def register(bot, *, build_embed, get_db, logger=None):
+    """Register /latest — browse the newest postings in the rich embed.
+
+    build_embed(row, type, expanded=...) -> discord.Embed
+    get_db() -> SupabaseDatabase
+    """
+    log = logger or logging.getLogger("cs_internship_bot")
+
     @bot.tree.command(
         name="latest",
-        description="Browse the latest internship opportunities",
+        description="Browse the latest internship or new-grad opportunities",
     )
-    async def latest(interaction: discord.Interaction):
+    @discord.app_commands.describe(type="Which roles to browse")
+    @discord.app_commands.choices(
+        type=[
+            discord.app_commands.Choice(name="Internships", value="internships"),
+            discord.app_commands.Choice(name="New Grad", value="new_grads"),
+        ]
+    )
+    async def latest(
+        interaction: discord.Interaction,
+        type: discord.app_commands.Choice[str] = None,
+    ):
+        await interaction.response.defer(thinking=True)
 
-        embed = create_internship_embed(internships[0], 0)
+        table = type.value if type else "internships"
+        kind_type = "new grad" if table == "new_grads" else "internship"
+        prefix = "New Grad" if table == "new_grads" else "Internship"
+        empty_word = "new-grad roles" if table == "new_grads" else "internships"
 
-        view = InternshipView(internships)
+        rows = _fetch_latest(get_db(), table)
+        if not rows:
+            await interaction.followup.send(
+                f"No {empty_word} available right now — check back soon."
+            )
+            return
 
-        await interaction.response.send_message(embed=embed, view=view)
+        view = JobBrowser(rows, build_embed, kind_type, prefix)
+        try:
+            await interaction.followup.send(embed=view.embed(), view=view)
+        except Exception:
+            log.exception("Failed sending /latest")
+            await interaction.followup.send("Something went wrong loading results.")
