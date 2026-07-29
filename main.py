@@ -21,18 +21,22 @@ from internships.jobright_internships import JobrightInternships
 from internships.simplify_internships import SimplifyInternships
 from new_grads.jobright_new_grad import JobrightNewGrad
 from new_grads.simplify_new_grad import SimplifyNewGrad
-from commands import testwelcome as testwelcome_cmd
-from commands import clearinternships as clearinternships_cmd
-from commands import refreshembeds as refreshembeds_cmd
-from commands import latest as latest_cmd
-from commands import search as search_cmd
-from commands import saved as saved_cmd
-from commands import stats as stats_cmd
-from commands import help_command as help_cmd
-from commands import resume as resume_cmd
-from commands import ai_commands as ai_cmd
-from commands import profile as profile_cmd
-from commands import subscribe as subscribe_cmd
+from commands import (
+    ai_commands as ai_cmd,
+    clearinternships as clearinternships_cmd,
+    commands_board,
+    help_command as help_cmd,
+    job_ai,
+    latest as latest_cmd,
+    profile as profile_cmd,
+    refreshembeds as refreshembeds_cmd,
+    resume as resume_cmd,
+    saved as saved_cmd,
+    search as search_cmd,
+    stats as stats_cmd,
+    subscribe as subscribe_cmd,
+    testwelcome as testwelcome_cmd,
+)
 
 
 load_dotenv()
@@ -42,6 +46,9 @@ WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID"))
 INTERNSHIPS_CHANNEL_ID = int(os.getenv("INTERNSHIPS_CHANNEL_ID"))
 #TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
 NEW_GRADS_CHANNEL_ID = int(os.getenv("NEW_GRADS_CHANNEL_ID"))
+# Optional: channel for the persistent command-guide message.
+_COMMANDS_CHANNEL_RAW = os.getenv("COMMANDS_CHANNEL_ID")
+COMMANDS_CHANNEL_ID = int(_COMMANDS_CHANNEL_RAW) if _COMMANDS_CHANNEL_RAW else None
 
 CATEGORY_COLORS = {
     "Software Engineering": discord.Color.blue(),
@@ -218,6 +225,8 @@ async def cache_channels():
     await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
     #await get_cached_channel("test_internships", TEST_INTERNSHIPS_CHANNEL_ID)
     await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
+    if COMMANDS_CHANNEL_ID:
+        await get_cached_channel("commands", COMMANDS_CHANNEL_ID)
 
 
 def normalize_company_info(company_info):
@@ -391,8 +400,21 @@ def format_pay(internship):
     return f"${low}k/yr" if low == high else f"${low}k - ${high}k/yr"
 
 
+_KIND_LABELS = {
+    "internship": "Internship",
+    "internships": "Internship",
+    "new grad": "New Grad",
+    "new_grad": "New Grad",
+    "new_grads": "New Grad",
+    "new grads": "New Grad",
+}
+
+
 def _job_type_label(internship, kind):
-    return internship.get("employment_type") or str(kind).title()
+    explicit = internship.get("employment_type")
+    if explicit:
+        return explicit
+    return _KIND_LABELS.get(str(kind).strip().lower(), str(kind).title())
 
 
 def build_internship_embed(internship, type="internship", expanded=False):
@@ -738,25 +760,27 @@ def _current_expanded(message):
     return False
 
 
-async def _handle_score(interaction, table, row_id):
-    # Placeholder — the résumé-vs-posting scoring pipeline isn't built yet.
-    # Wire the real logic here (fetch the user's résumé, compare against this
-    # posting's requirements/skills, return a match score).
+async def _run_job_ai(interaction, action, table, row_id):
+    """Shared body for the Score/Tailor buttons. Defers ephemerally (Gemma
+    takes seconds), runs the AI, sends the result embed or an error."""
     if interaction.response.is_done():
         return
-    await interaction.response.send_message(
-        "📊 Resume scoring is coming soon.", ephemeral=True
-    )
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    runner = job_ai.run_score if action == "score" else job_ai.run_tailor
+    embed, error = await runner(get_db(), interaction.user, table, row_id)
+    if error:
+        await interaction.followup.send(error, ephemeral=True)
+    else:
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+async def _handle_score(interaction, table, row_id):
+    await _run_job_ai(interaction, "score", table, row_id)
 
 
 async def _handle_tailor(interaction, table, row_id):
-    # Placeholder — résumé tailoring isn't built yet. Wire the real logic here
-    # (take the user's résumé + this posting, return a tailored version).
-    if interaction.response.is_done():
-        return
-    await interaction.response.send_message(
-        "✍️ Resume tailoring is coming soon.", ephemeral=True
-    )
+    await _run_job_ai(interaction, "tailor", table, row_id)
 
 
 async def handle_section_button(interaction):
@@ -1338,6 +1362,13 @@ async def on_ready():
             COMMANDS_SYNCED = True
         except Exception:
             logger.exception("Failed syncing slash commands")
+
+    if COMMANDS_CHANNEL_ID:
+        try:
+            channel = await get_cached_channel("commands", COMMANDS_CHANNEL_ID)
+            await commands_board.post_or_update_board(bot, channel)
+        except Exception:
+            logger.exception("Failed posting command board")
 
     if not check_new_internships.is_running():
         check_new_internships.start()

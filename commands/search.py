@@ -84,7 +84,9 @@ def register(bot, *, build_embed, get_db, logger=None):
             )
             return
 
-        view = JobBrowser(rows, build_embed, kind_type, "Result")
+        view = JobBrowser(
+            rows, build_embed, kind_type, "Result", get_db=get_db, table=table
+        )
         try:
             await interaction.followup.send(
                 content=f"🔎 **{len(rows)}** result(s) for "

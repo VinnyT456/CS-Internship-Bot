@@ -11,7 +11,6 @@ import logging
 import discord
 
 from commands import gemma_client, resume_utils
-from commands._browser import JobBrowser  # noqa: F401  (kept for parity/imports)
 
 log = logging.getLogger("cs_internship_bot")
 

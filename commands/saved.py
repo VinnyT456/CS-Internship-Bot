@@ -9,9 +9,11 @@ class SavedBrowser(JobBrowser):
     """The job browser with an extra Unsave button — removes the current
     posting from the user's saved list and drops it from the view."""
 
-    def __init__(self, rows, build_embed, unsave):
+    def __init__(self, rows, build_embed, unsave, get_db):
         self.unsave = unsave  # async (user, job_table, job_id) -> None
-        super().__init__(rows, build_embed, "internship", "Saved")
+        super().__init__(
+            rows, build_embed, "internship", "Saved", get_db=get_db, table="internships"
+        )
 
     def _sync_buttons(self):
         super()._sync_buttons()
@@ -80,7 +82,7 @@ def register(bot, *, build_embed, get_db, logger=None):
             )
             return
 
-        view = SavedBrowser(rows, build_embed, unsave)
+        view = SavedBrowser(rows, build_embed, unsave, get_db)
         try:
             await interaction.followup.send(
                 embed=view.embed(), view=view, ephemeral=True

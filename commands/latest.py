@@ -65,7 +65,9 @@ def register(bot, *, build_embed, get_db, logger=None):
             )
             return
 
-        view = JobBrowser(rows, build_embed, kind_type, prefix)
+        view = JobBrowser(
+            rows, build_embed, kind_type, prefix, get_db=get_db, table=table
+        )
         try:
             await interaction.followup.send(embed=view.embed(), view=view)
         except Exception:

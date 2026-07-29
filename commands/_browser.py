@@ -4,23 +4,34 @@ A JobBrowser renders one posting at a time in the full rich embed (always
 expanded) with a single button row: Prev · Apply · Score · Tailor · Next. All
 buttons are browse-owned (in-view callbacks) so a click never disturbs the
 view. Per-invocation, 5-minute timeout.
+
+Score/Tailor run the real AI when a get_db is passed; otherwise they show a
+"coming soon" note.
 """
 
 import discord
 
+from commands import job_ai
+
 
 class JobBrowser(discord.ui.View):
-    def __init__(self, rows, build_embed, kind_type, footer_prefix):
+    def __init__(self, rows, build_embed, kind_type, footer_prefix, get_db=None, table="internships"):
         super().__init__(timeout=300)
         self.rows = rows
         self.build_embed = build_embed
         self.kind_type = kind_type        # "internship" | "new grad" (embed Type)
         self.footer_prefix = footer_prefix  # e.g. "Internship" | "Result"
+        self.get_db = get_db
+        self.table = table
         self.index = 0
         self._sync_buttons()
 
     def _row(self):
         return self.rows[self.index]
+
+    def _row_table(self):
+        # Saved rows carry their own table; others use the browser's default.
+        return self._row().get("_job_table", self.table)
 
     def embed(self):
         embed = self.build_embed(self._row(), self.kind_type, expanded=True)
@@ -45,8 +56,8 @@ class JobBrowser(discord.ui.View):
                 )
             )
 
-        self.add_item(self._stub("Score", "📊", "📊 Resume scoring is coming soon."))
-        self.add_item(self._stub("Tailor", "✍️", "✍️ Resume tailoring is coming soon."))
+        self.add_item(self._ai("Score", "📊", "score"))
+        self.add_item(self._ai("Tailor", "✍️", "tailor"))
         self.add_item(self._nav("Next", "▶", 1, discord.ButtonStyle.primary))
 
     def _nav(self, label, emoji, step, style):
@@ -60,13 +71,27 @@ class JobBrowser(discord.ui.View):
         button.callback = cb
         return button
 
-    def _stub(self, label, emoji, coming_soon):
+    def _ai(self, label, emoji, action):
         button = discord.ui.Button(
             label=label, emoji=emoji, style=discord.ButtonStyle.secondary, row=0
         )
 
         async def cb(interaction):
-            await interaction.response.send_message(coming_soon, ephemeral=True)
+            if self.get_db is None:
+                await interaction.response.send_message(
+                    f"{emoji} {label} is coming soon.", ephemeral=True
+                )
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            runner = job_ai.run_score if action == "score" else job_ai.run_tailor
+            row_id = self._row().get("id")
+            embed, error = await runner(
+                self.get_db(), interaction.user, self._row_table(), row_id
+            )
+            if error:
+                await interaction.followup.send(error, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
         button.callback = cb
         return button
