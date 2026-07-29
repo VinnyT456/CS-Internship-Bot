@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 
 import yaml
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from yaml_resume_builder.template_renderer import render_template, validate_data
 
@@ -41,6 +41,26 @@ def _check_auth(authorization: str | None) -> None:
     expected = f"Bearer {BUILD_TOKEN}"
     if authorization != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# Progressive one-page optimization levels, mirroring the upstream CLI: try
+# each in order, keep the first PDF that fits on a single page.
+_ONE_PAGE_LEVELS = [
+    {"font_size": "11pt", "margin_reduction": 0.0, "spacing_factor": 1.0},
+    {"font_size": "10pt", "margin_reduction": 0.0, "spacing_factor": 0.9},
+    {"font_size": "10pt", "margin_reduction": 0.0, "spacing_factor": 0.8},
+    {"font_size": "10pt", "margin_reduction": 0.1, "spacing_factor": 0.7},
+    {"font_size": "10pt", "margin_reduction": 0.15, "spacing_factor": 0.6},
+]
+
+
+def _pdf_page_count(pdf_bytes: bytes) -> int:
+    """Count pages in a PDF without extra deps (count /Type /Page objects)."""
+    import re
+
+    # Reliable enough for tectonic output: count non-Pages page objects.
+    n = len(re.findall(rb"/Type\s*/Page[^s]", pdf_bytes))
+    return n or 1
 
 
 def _compile_with_tectonic(latex: str) -> bytes:
@@ -71,7 +91,32 @@ def _compile_with_tectonic(latex: str) -> bytes:
             return fh.read()
 
 
-@app.get("/health")
+def _build_one_page_pdf(data: dict) -> bytes:
+    """Render + compile progressively tighter until the resume fits one page.
+    Returns the first single-page PDF, else the tightest attempt."""
+    last_pdf = None
+    for params in _ONE_PAGE_LEVELS:
+        try:
+            latex = render_template(data, params)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Render error: {exc}")
+        pdf = _compile_with_tectonic(latex)
+        last_pdf = pdf
+        if _pdf_page_count(pdf) <= 1:
+            return pdf
+    # Nothing fit a single page — return the most compact attempt.
+    return last_pdf
+
+
+@app.api_route("/", methods=["GET", "HEAD"])
+def root():
+    # Root exists so uptime monitors pinging "/" get 200, not 404.
+    return {"service": "resume-build", "endpoints": ["/health", "/build"]}
+
+
+# GET and HEAD both allowed — UptimeRobot defaults to HEAD, which a GET-only
+# route rejects with 405.
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"ok": True, "tectonic": shutil.which(TECTONIC) is not None}
 
@@ -79,7 +124,6 @@ def health():
 @app.post("/build")
 async def build(
     request: Request,
-    one_page: int = Query(0),
     authorization: str | None = Header(default=None),
 ):
     _check_auth(authorization)
@@ -103,13 +147,8 @@ async def build(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Schema error: {exc}")
 
-    params = {"one_page": True} if one_page else None
-    try:
-        latex = render_template(data, params)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Render error: {exc}")
-
-    pdf = _compile_with_tectonic(latex)
+    # Always fit to one page via progressive optimization.
+    pdf = _build_one_page_pdf(data)
     name = str(data.get("name") or "resume").strip().replace(" ", "_")[:60] or "resume"
     return Response(
         content=pdf,

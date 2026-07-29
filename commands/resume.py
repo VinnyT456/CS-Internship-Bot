@@ -19,6 +19,16 @@ async def _prime_resume(db, uuid):
         if text:
             await asyncio.to_thread(resume_utils.store_text, db, uuid, text)
 
+        # Parse into the builder's structured schema once, so Tailor only has to
+        # rewrite bullets (fast) instead of regenerating the whole resume.
+        structured = await asyncio.to_thread(
+            resume_utils.parse_structured, text, img
+        )
+        if structured:
+            await asyncio.to_thread(
+                resume_utils.store_structured, db, uuid, structured
+            )
+
         # Precompute /reviewresume from the text (or image) so it's instant.
         from commands import ai_commands
 

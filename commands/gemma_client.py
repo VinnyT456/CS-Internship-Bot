@@ -3,14 +3,32 @@
 One lazily-created client (the API key never changes at runtime), a vision
 helper that takes the resume PNG plus a prompt, and a text-only helper. Calls
 are blocking, so command handlers run them via asyncio.to_thread.
+
+Reliability: the free Gemma tier intermittently returns 500/503 under load. Every
+call goes through _generate(), which retries with backoff and, if the primary
+model keeps failing, ROTATES to a fallback model so a busy primary doesn't kill
+the request.
 """
 
 import logging
 import os
+import time
 
 logger = logging.getLogger("cs_internship_bot")
 
+# Primary model, then a fallback to rotate to when the primary is overloaded.
 MODEL = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
+FALLBACK_MODEL = os.getenv("GEMMA_FALLBACK_MODEL", "gemma-4-31b-it")
+
+# Models to try in order. Each is attempted with a couple of retries before
+# rotating to the next.
+_MODEL_CHAIN = [m for m in (MODEL, FALLBACK_MODEL) if m]
+
+_RETRIES_PER_MODEL = int(os.getenv("GEMMA_RETRIES", "2"))
+_RETRY_BASE_DELAY = float(os.getenv("GEMMA_RETRY_DELAY", "1.5"))
+
+# HTTP statuses worth retrying / rotating on (transient overload / server error).
+_TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
 
 _client = None
 
@@ -24,10 +42,55 @@ def _get_client():
     return _client
 
 
+def _status_of(exc):
+    """Best-effort HTTP status code from a google-genai error."""
+    for attr in ("code", "status_code"):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int):
+            return val
+    return None
+
+
+def _generate(contents, config=None):
+    """Call generate_content with retry + model rotation. Returns the response,
+    or raises the last error if every model/attempt fails.
+
+    Order: for each model in the chain, try up to _RETRIES_PER_MODEL times with
+    exponential backoff on transient (429/5xx) errors; a non-transient error
+    aborts immediately."""
+    client = _get_client()
+    last_exc = None
+    for model in _MODEL_CHAIN:
+        for attempt in range(_RETRIES_PER_MODEL):
+            try:
+                return client.models.generate_content(
+                    model=model, contents=contents, config=config
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                status = _status_of(exc)
+                transient = status in _TRANSIENT_STATUSES
+                if not transient:
+                    # Real error (bad request, auth, etc.) — don't waste retries.
+                    raise
+                # Backoff before the next attempt on this model.
+                if attempt < _RETRIES_PER_MODEL - 1:
+                    delay = _RETRY_BASE_DELAY * (2**attempt)
+                    logger.warning(
+                        "Gemma %s transient %s — retry %d/%d in %.1fs",
+                        model, status, attempt + 1, _RETRIES_PER_MODEL, delay,
+                    )
+                    time.sleep(delay)
+        logger.warning("Gemma %s exhausted retries — rotating model", model)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("No Gemma model available")
+
+
 def ask_text(prompt: str) -> str | None:
     """Text-only completion. Returns the response text, or None on failure."""
     try:
-        resp = _get_client().models.generate_content(model=MODEL, contents=prompt)
+        resp = _generate(prompt)
         return (resp.text or "").strip() or None
     except Exception:
         logger.exception("Gemma text call failed")
@@ -45,10 +108,9 @@ def ask_json_text(
     try:
         from google.genai import types
 
-        resp = _get_client().models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
+        resp = _generate(
+            prompt,
+            types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
@@ -83,12 +145,11 @@ def ask_with_image(image_bytes: bytes, prompt: str) -> str | None:
     try:
         from google.genai import types
 
-        resp = _get_client().models.generate_content(
-            model=MODEL,
-            contents=[
+        resp = _generate(
+            [
                 types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
                 prompt,
-            ],
+            ]
         )
         return (resp.text or "").strip() or None
     except Exception:
@@ -111,13 +172,12 @@ def ask_json_with_image(
 
         from google.genai import types
 
-        resp = _get_client().models.generate_content(
-            model=MODEL,
-            contents=[
+        resp = _generate(
+            [
                 types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
                 prompt,
             ],
-            config=types.GenerateContentConfig(
+            types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,

@@ -415,7 +415,7 @@ async def run_score(db, user, table, row_id):
         ),
     )
     if not row:
-        return None, None, "That posting is no longer available."
+        return None, None, None, "That posting is no longer available."
 
     data = None
     if uid:
@@ -423,10 +423,10 @@ async def run_score(db, user, table, row_id):
 
     if data is None:
         if not uid:
-            return None, None, NEED_RESUME
+            return None, None, None, NEED_RESUME
         source = await _resume_source(db, uid)
         if not source:
-            return None, None, NEED_RESUME
+            return None, None, None, NEED_RESUME
 
         prompt = _SCORE_PROMPT.format(posting=_job_context(row))
         # Cap is generous: Gemma's JSON mode can silently burn budget and return
@@ -434,7 +434,7 @@ async def run_score(db, user, table, row_id):
         # 4000. Billing is on actual output, so the headroom is free.
         data = await _ask_json_resume(source, prompt, 4000)
         if not data:
-            return None, None, "The AI couldn't score the match right now — try again later."
+            return None, None, None, "The AI couldn't score the match right now — try again later."
 
         await asyncio.to_thread(db.set_cached_score, uid, table, row_id, data)
 
@@ -449,7 +449,7 @@ async def run_score(db, user, table, row_id):
         except Exception:
             log.exception("Failed rendering score wheel")
 
-    return embed, file, None
+    return embed, file, None, None
 
 
 # Tailor outputs the resume as YAML in the husayni/resume_builder schema — a
@@ -476,11 +476,17 @@ ONLY where they truthfully describe work the candidate already did.
 Write every experience and project bullet using Google's XYZ formula: \
 "Accomplished [X] as measured by [Y], by doing [Z]" — i.e. lead with the \
 accomplishment/impact [X], quantify it with a metric [Y], and state how it was \
-done with the tools/methods [Z]. Start each bullet with a strong past-tense \
-action verb. BUT the metric [Y] must be REAL: if the original resume does not \
-state a number for that bullet, do NOT invent one — write the [Y] slot as the \
-literal placeholder "[ADD METRIC]" for the candidate to fill in. Never fabricate \
-a figure to complete the formula.
+done with the tools/methods [Z]. BUT the metric [Y] must be REAL: if the \
+original resume does not state a number for that bullet, do NOT invent one — \
+write the [Y] slot as the literal placeholder "[ADD METRIC]" for the candidate \
+to fill in. Never fabricate a figure to complete the formula.
+
+Style: start each bullet with a strong past-tense action verb and do not reuse \
+the same opening verb twice; lead with impact not task; cut weak filler \
+("responsible for", "helped with", "worked on"); weave in the posting's EXACT \
+keyword/tech strings verbatim where truthful (ATS matches exact text); keep \
+bullets to one tight active-voice line, no first person. Order sections and \
+bullets so the most role-relevant content comes first.
 </task>
 
 <truth_rules>
@@ -556,6 +562,239 @@ def _strip_yaml_fence(text):
     return t.strip()
 
 
+# --- Fast tailor: rewrite only the bullets, keep everything else verbatim ----
+
+_BULLET_REWRITE_PROMPT = """<role>
+You are a hiring manager with 20 years of experience in tech who also tunes the \
+ATS that screen resumes.
+</role>
+
+<posting>
+{posting}
+</posting>
+
+<task>
+Rewrite each resume bullet below to target this posting and pass the ATS. Use \
+Google's XYZ formula: "Accomplished [X] as measured by [Y], by doing [Z]" — \
+lead with the accomplishment/impact [X], then the metric [Y], then how [Z]. \
+Mirror the posting's language and include its keywords ONLY where they \
+truthfully describe what the bullet already says.
+</task>
+
+<style_rules>
+- Start every bullet with a strong past-tense action verb (Built, Led, \
+Designed, Automated, Optimized, Shipped, Reduced, Architected). Do NOT reuse \
+the same opening verb twice.
+- Lead with impact/outcome, not the task ("Cut API latency…", not \
+"Was responsible for the API…").
+- Cut weak filler: "responsible for", "helped with", "worked on", "duties \
+included", "assisted in".
+- Weave in the posting's EXACT keywords/tech names verbatim (ATS matches on \
+exact strings) — but only where truthful.
+- Keep each bullet to one tight line; prefer active voice; no first person.
+</style_rules>
+
+<truth_rules>
+- Rewrite ONLY the wording of each given bullet — never invent new facts, tools, \
+employers, or scope.
+- NEVER add or guess a NUMBER. If a bullet has no real metric, write the [Y] \
+slot as the literal placeholder "[ADD METRIC]".
+- Keep the SAME number of bullets, in the SAME order.
+</truth_rules>
+
+<output_format>
+Return ONLY a JSON array of the rewritten bullet strings, same length and order \
+as the input list. No keys, no prose.
+Example: ["Rewrote bullet 1 ...", "Rewrote bullet 2 ..."]
+</output_format>
+
+<bullets>
+{bullets}
+</bullets>"""
+
+
+def _collect_bullets(structured):
+    """Gather every experience/project bullet with a locator so we can splice
+    rewrites back. Returns (locators, texts)."""
+    locators, texts = [], []
+    for section in ("experience", "projects"):
+        items = structured.get(section)
+        if not isinstance(items, list):
+            continue
+        for i, item in enumerate(items):
+            desc = item.get("description") if isinstance(item, dict) else None
+            if not isinstance(desc, list):
+                continue
+            for j, bullet in enumerate(desc):
+                if str(bullet).strip():
+                    locators.append((section, i, j))
+                    texts.append(str(bullet).strip())
+    return locators, texts
+
+
+def _splice_bullets(structured, locators, rewritten):
+    """Return a deep-ish copy of structured with rewritten bullets spliced in.
+    Falls back to the original bullet if a rewrite is missing/blank."""
+    import copy
+
+    out = copy.deepcopy(structured)
+    for (section, i, j), new in zip(locators, rewritten):
+        new = str(new).strip()
+        if not new:
+            continue
+        try:
+            out[section][i]["description"][j] = new
+        except (KeyError, IndexError, TypeError):
+            continue
+    return out
+
+
+def _tailor_yaml_fast(structured, row):
+    """Fast path: rewrite only the bullets via one small Gemma call, splice them
+    into the stored structure, and dump YAML. Returns YAML str or None. Blocking
+    — call via asyncio.to_thread."""
+    import yaml as _yaml
+
+    locators, texts = _collect_bullets(structured)
+    if not texts:
+        # Nothing to rewrite — just serialize the stored structure.
+        return _yaml.safe_dump(structured, sort_keys=False, allow_unicode=True)
+
+    numbered = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(texts))
+    prompt = _BULLET_REWRITE_PROMPT.format(
+        posting=_job_context(row), bullets=numbered
+    )
+    data = gemma_client.ask_json_text(prompt, 2000)
+    if not isinstance(data, list) or not data:
+        return None
+    tailored = _splice_bullets(structured, locators, data)
+    return _yaml.safe_dump(tailored, sort_keys=False, allow_unicode=True)
+
+
+_METRIC_TOKEN = "[ADD METRIC]"
+
+
+def _metric_contexts(yaml_text, limit=5):
+    """The lines containing [ADD METRIC], trimmed for use as modal labels."""
+    out = []
+    for line in yaml_text.splitlines():
+        if _METRIC_TOKEN in line:
+            ctx = line.strip().lstrip("-").strip().strip('"')
+            out.append(ctx)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _fill_metrics(yaml_text, values):
+    """Replace each [ADD METRIC] with the next provided value, in order. A blank
+    value collapses the ' as measured by [ADD METRIC]' phrasing to read cleanly."""
+    parts = yaml_text.split(_METRIC_TOKEN)
+    if len(parts) == 1:
+        return yaml_text
+    out = parts[0]
+    for i, tail in enumerate(parts[1:]):
+        val = values[i].strip() if i < len(values) else ""
+        if val:
+            out += val + tail
+        else:
+            # No metric given — drop the dangling "as measured by " lead-in.
+            trimmed = re.sub(r"(?i)\s*as measured by\s*$", "", out)
+            out = trimmed + tail
+    return out
+
+
+class MetricsModal(discord.ui.Modal):
+    """Collects real metric values for each [ADD METRIC] placeholder, then
+    rebuilds the resume PDF."""
+
+    def __init__(self, view, contexts):
+        super().__init__(title="Add your real metrics")
+        self._view = view
+        self._inputs = []
+        for i, ctx in enumerate(contexts[:5]):
+            label = (ctx[:42] + "…") if len(ctx) > 43 else ctx
+            field = discord.ui.TextInput(
+                label=f"Metric {i + 1}",
+                placeholder=label or "e.g. 30%, 5k users, 3 people",
+                required=False,
+                max_length=100,
+            )
+            self._inputs.append(field)
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        values = [f.value for f in self._inputs]
+        await self._view.rebuild_with_metrics(interaction, values)
+
+
+class TailorView(discord.ui.View):
+    """Post-tailor actions: fill in the [ADD METRIC] blanks, then (re)build the
+    one-page PDF. Holds the working YAML in memory for this ephemeral message."""
+
+    def __init__(self, yaml_text, company, n_placeholders):
+        super().__init__(timeout=900)
+        self.yaml_text = yaml_text
+        self.company = company
+        self.safe_company = re.sub(r"[^A-Za-z0-9_-]+", "_", company).strip("_") or "role"
+        self._add_buttons(n_placeholders)
+
+    def _add_buttons(self, n_placeholders):
+        self.clear_items()
+        if n_placeholders:
+            btn = discord.ui.Button(
+                label=f"Add {n_placeholders} metric(s)",
+                emoji="📊",
+                style=discord.ButtonStyle.primary,
+            )
+            btn.callback = self._on_add_metrics
+            self.add_item(btn)
+        build = discord.ui.Button(
+            label="Build PDF", emoji="📄", style=discord.ButtonStyle.success
+        )
+        build.callback = self._on_build
+        self.add_item(build)
+
+    async def _on_add_metrics(self, interaction):
+        contexts = _metric_contexts(self.yaml_text)
+        await interaction.response.send_modal(MetricsModal(self, contexts))
+
+    async def _on_build(self, interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._send_pdf(interaction)
+
+    async def rebuild_with_metrics(self, interaction, values):
+        self.yaml_text = _fill_metrics(self.yaml_text, values)
+        n_left = self.yaml_text.count(_METRIC_TOKEN)
+        self._add_buttons(n_left)
+        await self._send_pdf(interaction, note="Metrics added. ")
+
+    async def _send_pdf(self, interaction, note=""):
+        pdf = await asyncio.to_thread(_build_pdf_sync, self.yaml_text)
+        if pdf:
+            file = discord.File(
+                io_bytes(pdf), filename=f"resume_{self.safe_company}.pdf"
+            )
+            n_left = self.yaml_text.count(_METRIC_TOKEN)
+            msg = f"{note}Your 1-page tailored resume — preview below, click to download."
+            if n_left:
+                msg += f"\n⚠️ {n_left} `[ADD METRIC]` still blank — press **Add metrics** to fill them."
+            await interaction.followup.send(content=msg, file=file, view=self, ephemeral=True)
+        else:
+            file = discord.File(
+                io_bytes(self.yaml_text.encode("utf-8")),
+                filename=f"tailored_resume_{self.safe_company}.yaml",
+            )
+            await interaction.followup.send(
+                content="The PDF builder is unavailable right now — here's the YAML. "
+                "Try **Build PDF** again in a moment.",
+                file=file,
+                view=self,
+                ephemeral=True,
+            )
+
+
 async def run_tailor(db, user, table, row_id):
     """Tailor the resume for this posting as YAML (for the downstream resume
     builder). Returns (embed, file, error) — file is the .yaml attachment.
@@ -567,59 +806,74 @@ async def run_tailor(db, user, table, row_id):
         ),
     )
     if not row:
-        return None, None, "That posting is no longer available."
+        return None, None, None, "That posting is no longer available."
     if not uid:
-        return None, None, NEED_RESUME
-    source = await _resume_source(db, uid)
-    if not source:
-        return None, None, NEED_RESUME
+        return None, None, None, NEED_RESUME
 
-    prompt = _TAILOR_PROMPT.format(posting=_job_context(row))
-    kind, payload = source
-    if kind == "text":
-        full = f"{prompt}\n\n<resume>\n{payload}\n</resume>"
-        answer = await asyncio.to_thread(gemma_client.ask_text, full)
-    else:
-        answer = await asyncio.to_thread(
-            gemma_client.ask_with_image, payload, prompt
-        )
-    if not answer:
-        return None, None, "The AI couldn't tailor your resume right now — try again later."
+    yaml_text = None
 
-    yaml_text = _strip_yaml_fence(answer)
+    # Fast path: rewrite only the bullets against the stored structured resume.
+    structured = await asyncio.to_thread(resume_utils.get_structured, db, uid)
+    if structured:
+        yaml_text = await asyncio.to_thread(_tailor_yaml_fast, structured, row)
+
+    # Fallback: full-resume regeneration from text/image (also covers resumes
+    # uploaded before structuring existed).
     if not yaml_text:
-        return None, None, "The AI couldn't tailor your resume right now — try again later."
+        source = await _resume_source(db, uid)
+        if not source:
+            return None, None, None, NEED_RESUME
+        prompt = _TAILOR_PROMPT.format(posting=_job_context(row))
+        kind, payload = source
+        if kind == "text":
+            full = f"{prompt}\n\n<resume>\n{payload}\n</resume>"
+            answer = await asyncio.to_thread(gemma_client.ask_text, full)
+        else:
+            answer = await asyncio.to_thread(
+                gemma_client.ask_with_image, payload, prompt
+            )
+        if not answer:
+            return None, None, None, "The AI couldn't tailor your resume right now — try again later."
+        yaml_text = _strip_yaml_fence(answer)
+
+    if not yaml_text:
+        return None, None, None, "The AI couldn't tailor your resume right now — try again later."
 
     company = row.get("company_name") or "role"
-    n_placeholders = yaml_text.count("[ADD METRIC]")
+    n_placeholders = yaml_text.count(_METRIC_TOKEN)
 
-    # Try to compile a PDF via the build service; fall back to the YAML file.
+    # Build the initial PDF preview (1-page). The view lets the user fill in the
+    # [ADD METRIC] blanks via a modal and rebuild.
+    view = TailorView(yaml_text, company, n_placeholders)
     pdf = await asyncio.to_thread(_build_pdf_sync, yaml_text)
+    safe = view.safe_company
 
-    safe_company = re.sub(r"[^A-Za-z0-9_-]+", "_", company).strip("_") or "role"
     if pdf:
-        primary = discord.File(io_bytes(pdf), filename=f"resume_{safe_company}.pdf")
-        built_line = "Your tailored resume as a ready-to-send **PDF**"
+        primary = discord.File(io_bytes(pdf), filename=f"resume_{safe}.pdf")
+        built_line = "Your **1-page** tailored resume — preview below, click to download."
     else:
         primary = discord.File(
             io_bytes(yaml_text.encode("utf-8")),
-            filename=f"tailored_resume_{safe_company}.yaml",
+            filename=f"tailored_resume_{safe}.yaml",
         )
-        built_line = "Your tailored resume as **YAML** for the resume builder"
+        built_line = (
+            "The PDF builder is unavailable right now — here's the YAML. "
+            "Press **Build PDF** to retry."
+        )
 
     desc = (
-        f"{built_line}, reworded for this posting and ATS-optimized. "
+        f"{built_line}\nReworded for this posting and ATS-optimized. "
         "**Only your real content was used — nothing was invented.**\n"
-        "*AI-generated from your uploaded resume — review before using.*"
+        "*AI-generated — review before using.*"
     )
     if n_placeholders:
         desc += (
             f"\n\n⚠️ **{n_placeholders}× `[ADD METRIC]`** — the AI never makes up "
-            "numbers. Replace each placeholder with a real metric you can back up."
+            "numbers. Press **📊 Add metrics** to fill them, then it rebuilds."
         )
     embed = discord.Embed(
         title=f"✍️ Tailored resume — {company}"[:256],
         description=desc,
         color=discord.Color.blurple(),
     )
-    return embed, primary, None
+    return embed, primary, view, None

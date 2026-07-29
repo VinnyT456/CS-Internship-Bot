@@ -198,6 +198,58 @@ def get_review(db, user_uuid) -> dict | None:
     return r if isinstance(r, dict) else None
 
 
+# --- Structured resume (builder schema) for fast bullet-only tailoring -------
+
+_STRUCTURE_PROMPT = (
+    "Parse this resume into the following JSON structure, using ONLY what the "
+    "resume actually shows — copy every value verbatim, invent nothing, and "
+    "leave unknown fields as empty strings/lists.\n"
+    "{\n"
+    '  "name": "", "contact": {"phone": "", "email": "", "linkedin": "", "github": ""},\n'
+    '  "education": [{"school": "", "location": "", "degree": "", "dates": ""}],\n'
+    '  "experience": [{"company": "", "role": "", "location": "", "dates": "", "description": [""]}],\n'
+    '  "projects": [{"name": "", "technologies": [""], "date": "", "link": "", "description": [""]}],\n'
+    '  "skills": [{"category": "", "list": [""]}],\n'
+    '  "achievements": [""], "publications": [""],\n'
+    '  "certifications": [{"name": "", "link": ""}]\n'
+    "}\n"
+    "Preserve bullet wording exactly. Return ONLY the JSON."
+)
+
+
+def parse_structured(text=None, img=None) -> dict | None:
+    """Parse a resume into the builder's structured schema (JSON) from text
+    (preferred) or image. Returns dict or None. Safe to call off-thread."""
+    from commands import gemma_client
+
+    if text:
+        return gemma_client.ask_json_text(
+            f"{_STRUCTURE_PROMPT}\n\n<resume>\n{text}\n</resume>", 4000
+        )
+    if img:
+        return gemma_client.ask_json_with_image(img, _STRUCTURE_PROMPT, 4000)
+    return None
+
+
+def get_structured(db, user_uuid) -> dict | None:
+    """The stored structured resume (builder schema), or None."""
+    row = get_resume(db, user_uuid)
+    if not row:
+        return None
+    s = row.get("structured_json")
+    return s if isinstance(s, dict) else None
+
+
+def store_structured(db, user_uuid, structured: dict) -> None:
+    """Persist the structured resume. Best-effort."""
+    try:
+        db.supabase.table("resumes").update({"structured_json": structured}).eq(
+            "user_id", user_uuid
+        ).execute()
+    except Exception:
+        logger.exception("Failed storing structured resume for %s", user_uuid)
+
+
 def store_review(db, user_uuid, review: dict) -> None:
     """Persist a precomputed resume review. Best-effort."""
     try:
