@@ -201,9 +201,11 @@ def get_review(db, user_uuid) -> dict | None:
 # --- Structured resume (builder schema) for fast bullet-only tailoring -------
 
 _STRUCTURE_PROMPT = (
-    "Parse this resume into the following JSON structure, using ONLY what the "
-    "resume actually shows — copy every value verbatim, invent nothing, and "
-    "leave unknown fields as empty strings/lists.\n"
+    "Parse this resume into ONE JSON OBJECT with the exact keys below, using "
+    "ONLY what the resume actually shows — copy every value verbatim, invent "
+    "nothing, leave unknown fields as empty strings/lists.\n"
+    "The top-level output MUST be a single JSON object that starts with '{' and "
+    "ends with '}'. Do NOT return a JSON array/list at the top level.\n"
     "{\n"
     '  "name": "", "contact": {"phone": "", "email": "", "linkedin": "", "github": ""},\n'
     '  "education": [{"school": "", "location": "", "degree": "", "dates": ""}],\n'
@@ -213,21 +215,62 @@ _STRUCTURE_PROMPT = (
     '  "achievements": [""], "publications": [""],\n'
     '  "certifications": [{"name": "", "link": ""}]\n'
     "}\n"
-    "Preserve bullet wording exactly. Return ONLY the JSON."
+    "Preserve bullet wording exactly. Return ONLY the JSON object."
 )
 
 
 def parse_structured(text=None, img=None) -> dict | None:
     """Parse a resume into the builder's structured schema (JSON) from text
-    (preferred) or image. Returns dict or None. Safe to call off-thread."""
+    (preferred) or image. Returns a dict with at least a name/experience shape,
+    or None. Safe to call off-thread."""
     from commands import gemma_client
 
+    # Big output — give generous headroom (Gemma JSON mode wastes budget at
+    # tight caps and returns empty).
     if text:
-        return gemma_client.ask_json_text(
-            f"{_STRUCTURE_PROMPT}\n\n<resume>\n{text}\n</resume>", 4000
+        data = gemma_client.ask_json_text(
+            f"{_STRUCTURE_PROMPT}\n\n<resume>\n{text}\n</resume>", 6000
         )
-    if img:
-        return gemma_client.ask_json_with_image(img, _STRUCTURE_PROMPT, 4000)
+    elif img:
+        data = gemma_client.ask_json_with_image(img, _STRUCTURE_PROMPT, 6000)
+    else:
+        return None
+
+    data = _coerce_resume_object(data)
+    if not isinstance(data, dict):
+        logger.warning("parse_structured: could not coerce to object")
+        return None
+    if not any(k in data for k in ("name", "experience", "projects", "skills")):
+        logger.warning("parse_structured: JSON missing expected resume keys")
+        return None
+    return data
+
+
+_RESUME_KEYS = {
+    "name", "contact", "education", "experience", "projects",
+    "skills", "achievements", "publications", "certifications",
+}
+
+
+def _coerce_resume_object(data):
+    """Gemma sometimes wraps the resume object in a list, or returns the sections
+    as separate single-key dicts in a list. Normalize those back to one object."""
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        # Case 1: [ {full resume object} ]
+        dicts = [d for d in data if isinstance(d, dict)]
+        for d in dicts:
+            if len(set(d) & _RESUME_KEYS) >= 2:
+                return d
+        # Case 2: [ {"experience":[...]}, {"skills":[...]}, ... ] -> merge.
+        merged = {}
+        for d in dicts:
+            for k, v in d.items():
+                if k in _RESUME_KEYS:
+                    merged[k] = v
+        if merged:
+            return merged
     return None
 
 

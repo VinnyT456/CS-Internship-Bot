@@ -8,37 +8,80 @@ from commands import resume_utils
 log = logging.getLogger("cs_internship_bot")
 
 
-async def _prime_resume(db, uuid):
-    """After an upload: transcribe the resume to text once (so later AI calls go
-    text-only) and precompute the review. Runs in the background; best-effort."""
-    try:
-        img = await asyncio.to_thread(resume_utils.image_bytes, db, uuid)
-        if not img:
-            return
-        text = await asyncio.to_thread(resume_utils.extract_text, img)
+async def _retry_async(fn, *args, tries=3, delay=3.0, label=""):
+    """Run a blocking fn via a thread, retrying on empty/None result — the free
+    Gemma tier returns None under load, so one attempt often isn't enough."""
+    for attempt in range(tries):
+        try:
+            result = await asyncio.to_thread(fn, *args)
+        except Exception:
+            log.exception("prime step %s attempt %d raised", label, attempt + 1)
+            result = None
+        if result:
+            return result
+        if attempt < tries - 1:
+            await asyncio.sleep(delay * (attempt + 1))
+    log.warning("prime step %s produced nothing after %d tries", label, tries)
+    return None
+
+
+async def prime_resume(db, uuid, *, force=False):
+    """Populate the resume table with everything the AI commands need — extracted
+    text, the builder-structured resume, and the precomputed review — retrying
+    through transient Gemma failures. Idempotent: skips fields already present
+    unless force=True. Returns a dict of what's now populated.
+
+    This is what makes Tailor fast: with structured_json present, Tailor only
+    rewrites bullets instead of regenerating the whole resume.
+    """
+    from commands import ai_commands
+
+    status = {"text": False, "structured": False, "review": False}
+    img = await asyncio.to_thread(resume_utils.image_bytes, db, uuid)
+    if not img:
+        log.warning("prime_resume: no resume image for %s", uuid)
+        return status
+
+    row = await asyncio.to_thread(resume_utils.get_resume, db, uuid) or {}
+
+    # 1. Extracted text — the basis for the fast text-only path.
+    text = None if force else (row.get("extracted_text") or None)
+    if text:
+        status["text"] = True
+    else:
+        text = await _retry_async(resume_utils.extract_text, img, label="extract_text")
         if text:
             await asyncio.to_thread(resume_utils.store_text, db, uuid, text)
+            status["text"] = True
 
-        # Parse into the builder's structured schema once, so Tailor only has to
-        # rewrite bullets (fast) instead of regenerating the whole resume.
-        structured = await asyncio.to_thread(
-            resume_utils.parse_structured, text, img
+    # 2. Structured resume — enables the fast bullet-only Tailor path.
+    if not force and isinstance(row.get("structured_json"), dict):
+        status["structured"] = True
+    else:
+        structured = await _retry_async(
+            resume_utils.parse_structured, text, img, label="parse_structured"
         )
         if structured:
-            await asyncio.to_thread(
-                resume_utils.store_structured, db, uuid, structured
-            )
+            await asyncio.to_thread(resume_utils.store_structured, db, uuid, structured)
+            status["structured"] = True
 
-        # Precompute /reviewresume from the text (or image) so it's instant.
-        from commands import ai_commands
-
-        review = await asyncio.to_thread(
-            ai_commands.compute_review, text, img
+    # 3. Precomputed review — makes /reviewresume instant.
+    if not force and isinstance(row.get("review_json"), dict):
+        status["review"] = True
+    else:
+        review = await _retry_async(
+            ai_commands.compute_review, text, img, label="compute_review"
         )
         if review:
             await asyncio.to_thread(resume_utils.store_review, db, uuid, review)
-    except Exception:
-        log.exception("Resume priming failed for %s", uuid)
+            status["review"] = True
+
+    log.info("prime_resume %s -> %s", uuid, status)
+    return status
+
+
+# Back-compat alias for the background task.
+_prime_resume = prime_resume
 
 
 def register(bot, *, get_db, logger=None):
@@ -100,15 +143,37 @@ def register(bot, *, get_db, logger=None):
             return
 
         await interaction.followup.send(
-            f"✅ Resume uploaded — **{discord.utils.escape_markdown(file.filename)}**. "
-            "Warming it up for /match, /reviewresume, and recommendations…",
+            f"✅ Resume uploaded — **{discord.utils.escape_markdown(file.filename)}**.\n"
+            "⏳ Reading and indexing it for /match, /reviewresume, /tailor, and "
+            "recommendations… this can take a minute — you'll get a note when it's "
+            "ready.",
             ephemeral=True,
         )
 
-        # Precompute in the background so the reply isn't blocked: transcribe the
-        # resume to text once (lets later AI calls skip vision) and cache the
-        # review. Best-effort — failures just mean the first command is slower.
-        asyncio.create_task(_prime_resume(db, uuid))
+        # Prime in the background so the reply isn't blocked. When it finishes we
+        # DM-style follow up with the result so the user knows it's ready (and
+        # which parts, if the AI was flaky).
+        async def _prime_and_report():
+            status = await prime_resume(db, uuid, force=True)
+            ready = all(status.values())
+            if ready:
+                msg = "🎉 Your resume is fully ready — /tailor and /match will be fast now."
+            else:
+                done = [k for k, v in status.items() if v]
+                missing = [k for k, v in status.items() if not v]
+                msg = (
+                    "⚠️ Your resume is partly ready"
+                    f" (done: {', '.join(done) or 'none'};"
+                    f" retry later for: {', '.join(missing)}). "
+                    "The AI service was busy — commands still work, just slower. "
+                    "Re-run `/resume upload` or try again in a bit to finish indexing."
+                )
+            try:
+                await interaction.followup.send(msg, ephemeral=True)
+            except Exception:
+                log.exception("Failed sending prime-complete note")
+
+        asyncio.create_task(_prime_and_report())
 
     @group.command(name="view", description="See your current resume")
     async def view(interaction: discord.Interaction):

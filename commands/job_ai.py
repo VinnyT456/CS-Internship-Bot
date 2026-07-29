@@ -672,127 +672,282 @@ def _tailor_yaml_fast(structured, row):
 
 
 _METRIC_TOKEN = "[ADD METRIC]"
+_MODAL_PAGE = 5  # Discord modal hard limit is 5 inputs
 
 
-def _metric_contexts(yaml_text, limit=5):
-    """The lines containing [ADD METRIC], trimmed for use as modal labels."""
-    out = []
+def _split_on_metrics(yaml_text):
+    """Split YAML into the fixed segments around each [ADD METRIC]. len(segments)
+    == n_metrics + 1, so rejoining segments[i] + value[i] rebuilds the text."""
+    return yaml_text.split(_METRIC_TOKEN)
+
+
+def _metric_labels(yaml_text):
+    """A short, human label for each [ADD METRIC] blank — the bullet fragment it
+    lives in, so the user knows exactly which achievement they're quantifying."""
+    labels = []
     for line in yaml_text.splitlines():
-        if _METRIC_TOKEN in line:
-            ctx = line.strip().lstrip("-").strip().strip('"')
-            out.append(ctx)
-            if len(out) >= limit:
-                break
-    return out
+        count = line.count(_METRIC_TOKEN)
+        if not count:
+            continue
+        frag = line.strip().lstrip("-").strip().strip('"')
+        # Prefer the words just before the token — that's the accomplishment.
+        head = frag.split(_METRIC_TOKEN)[0].strip()
+        head = re.sub(r"(?i)\s*as measured by\s*$", "", head).strip()
+        label = head or frag
+        for _ in range(count):
+            labels.append(label)
+    return labels
 
 
-def _fill_metrics(yaml_text, values):
-    """Replace each [ADD METRIC] with the next provided value, in order. A blank
-    value collapses the ' as measured by [ADD METRIC]' phrasing to read cleanly."""
-    parts = yaml_text.split(_METRIC_TOKEN)
-    if len(parts) == 1:
-        return yaml_text
-    out = parts[0]
-    for i, tail in enumerate(parts[1:]):
-        val = values[i].strip() if i < len(values) else ""
-        if val:
-            out += val + tail
+def _metric_bullets(yaml_text):
+    """The FULL bullet text each [ADD METRIC] sits in, so the user can read the
+    whole achievement while entering its metric. Token shown as a blank slot."""
+    bullets = []
+    for line in yaml_text.splitlines():
+        count = line.count(_METRIC_TOKEN)
+        if not count:
+            continue
+        frag = line.strip().lstrip("-").strip().strip('"')
+        shown = frag.replace(_METRIC_TOKEN, "____")
+        for _ in range(count):
+            bullets.append(shown)
+    return bullets
+
+
+def _rejoin_metrics(segments, values):
+    """Rebuild YAML from fixed segments + the current metric values. A blank
+    value collapses the ' as measured by' lead-in so the bullet still reads well;
+    an unfilled value keeps the [ADD METRIC] token so it's visible/rebuildable."""
+    out = segments[0]
+    for i, tail in enumerate(segments[1:]):
+        val = (values[i] or "").strip() if i < len(values) else ""
+        if val == "":
+            # Not filled yet — keep the token so the user still sees the blank.
+            out += _METRIC_TOKEN + tail
+        elif val == _SKIP:
+            # Explicitly skipped — drop the "as measured by" phrasing cleanly.
+            out = re.sub(r"(?i)\s*as measured by\s*$", "", out) + tail
         else:
-            # No metric given — drop the dangling "as measured by " lead-in.
-            trimmed = re.sub(r"(?i)\s*as measured by\s*$", "", out)
-            out = trimmed + tail
+            out += val + tail
     return out
+
+
+# Sentinel for "user chose to skip this metric" (distinct from not-yet-filled).
+_SKIP = "\x00SKIP\x00"
 
 
 class MetricsModal(discord.ui.Modal):
-    """Collects real metric values for each [ADD METRIC] placeholder, then
-    rebuilds the resume PDF."""
+    """One page (up to 5) of metric inputs. Pre-fills any values already entered
+    so the user can edit, and writes back by absolute index."""
 
-    def __init__(self, view, contexts):
-        super().__init__(title="Add your real metrics")
+    def __init__(self, view, start):
+        page_no = start // _MODAL_PAGE + 1
+        total_pages = (len(view.labels) + _MODAL_PAGE - 1) // _MODAL_PAGE
+        title = "Add your real metrics"
+        if total_pages > 1:
+            title += f" ({page_no}/{total_pages})"
+        super().__init__(title=title[:45])
         self._view = view
-        self._inputs = []
-        for i, ctx in enumerate(contexts[:5]):
-            label = (ctx[:42] + "…") if len(ctx) > 43 else ctx
+        self._start = start
+        self._fields = []
+        for idx in range(start, min(start + _MODAL_PAGE, len(view.labels))):
+            label = view.labels[idx]
+            bullet = view.bullets[idx] if idx < len(view.bullets) else label
+            current = view.values[idx]
+            default = "" if current in ("", _SKIP) else current
+            # Label = the accomplishment; placeholder = the FULL bullet with the
+            # metric slot shown as ____, so the user sees exactly what to fill.
             field = discord.ui.TextInput(
-                label=f"Metric {i + 1}",
-                placeholder=label or "e.g. 30%, 5k users, 3 people",
+                label=f"{idx + 1}. {label}"[:45],
+                placeholder=(bullet[:97] + "…") if len(bullet) > 98 else bullet,
+                default=default or None,
                 required=False,
                 max_length=100,
             )
-            self._inputs.append(field)
+            self._fields.append((idx, field))
             self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        values = [f.value for f in self._inputs]
-        await self._view.rebuild_with_metrics(interaction, values)
+        for idx, field in self._fields:
+            raw = (field.value or "").strip()
+            # Empty box on submit = user chose to skip this one.
+            self._view.values[idx] = raw if raw else _SKIP
+        await self._view.refresh(interaction)
 
 
 class TailorView(discord.ui.View):
-    """Post-tailor actions: fill in the [ADD METRIC] blanks, then (re)build the
-    one-page PDF. Holds the working YAML in memory for this ephemeral message."""
+    """Post-tailor workspace: a live status board of every [ADD METRIC] blank,
+    plus buttons to fill them (paged modals), rebuild the 1-page PDF, or download
+    as-is. Holds working state in memory for this ephemeral message."""
 
-    def __init__(self, yaml_text, company, n_placeholders):
-        super().__init__(timeout=900)
-        self.yaml_text = yaml_text
+    def __init__(self, yaml_text, company):
+        super().__init__(timeout=1800)
         self.company = company
         self.safe_company = re.sub(r"[^A-Za-z0-9_-]+", "_", company).strip("_") or "role"
-        self._add_buttons(n_placeholders)
+        self.segments = _split_on_metrics(yaml_text)
+        self.labels = _metric_labels(yaml_text)
+        self.bullets = _metric_bullets(yaml_text)
+        # "" = not touched, _SKIP = skipped, else the entered value.
+        self.values = ["" for _ in self.labels]
+        self.last_pdf = None
+        self._build_buttons()
 
-    def _add_buttons(self, n_placeholders):
-        self.clear_items()
-        if n_placeholders:
-            btn = discord.ui.Button(
-                label=f"Add {n_placeholders} metric(s)",
-                emoji="📊",
-                style=discord.ButtonStyle.primary,
-            )
-            btn.callback = self._on_add_metrics
-            self.add_item(btn)
-        build = discord.ui.Button(
-            label="Build PDF", emoji="📄", style=discord.ButtonStyle.success
+    # --- state helpers ----------------------------------------------------
+    @property
+    def n_total(self):
+        return len(self.labels)
+
+    @property
+    def n_filled(self):
+        return sum(1 for v in self.values if v not in ("", _SKIP))
+
+    @property
+    def n_pending(self):
+        return sum(1 for v in self.values if v == "")
+
+    def current_yaml(self):
+        return _rejoin_metrics(self.segments, self.values)
+
+    # --- rendering --------------------------------------------------------
+    def status_embed(self):
+        """A scannable checklist: every bullet, its metric status, progress."""
+        filled, total = self.n_filled, self.n_total
+        color = (
+            discord.Color.green() if total and filled == total
+            else discord.Color.blurple()
         )
-        build.callback = self._on_build
-        self.add_item(build)
-
-    async def _on_add_metrics(self, interaction):
-        contexts = _metric_contexts(self.yaml_text)
-        await interaction.response.send_modal(MetricsModal(self, contexts))
-
-    async def _on_build(self, interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._send_pdf(interaction)
-
-    async def rebuild_with_metrics(self, interaction, values):
-        self.yaml_text = _fill_metrics(self.yaml_text, values)
-        n_left = self.yaml_text.count(_METRIC_TOKEN)
-        self._add_buttons(n_left)
-        await self._send_pdf(interaction, note="Metrics added. ")
-
-    async def _send_pdf(self, interaction, note=""):
-        pdf = await asyncio.to_thread(_build_pdf_sync, self.yaml_text)
-        if pdf:
-            file = discord.File(
-                io_bytes(pdf), filename=f"resume_{self.safe_company}.pdf"
+        embed = discord.Embed(
+            title=f"✍️ Tailored resume — {self.company}"[:256], color=color
+        )
+        if not total:
+            embed.description = (
+                "Your **1-page** tailored resume is ready — preview below, "
+                "click to download.\n*Only your real content was used.*"
             )
-            n_left = self.yaml_text.count(_METRIC_TOKEN)
-            msg = f"{note}Your 1-page tailored resume — preview below, click to download."
-            if n_left:
-                msg += f"\n⚠️ {n_left} `[ADD METRIC]` still blank — press **Add metrics** to fill them."
-            await interaction.followup.send(content=msg, file=file, view=self, ephemeral=True)
+            return embed
+
+        blocks = "🟩" * filled + "⬜" * (total - filled)
+        embed.description = (
+            f"**Metrics: {filled}/{total} filled**  {blocks}\n"
+            "Each bullet below shows where a number goes (`____`). Press "
+            "**📊 Add metrics** to fill them in — or skip any you don't have. "
+            "Nothing is invented for you.\n​"
+        )
+        # Per-bullet checklist: show the FULL bullet so the user knows what the
+        # number is measuring, plus its current status. Embeds cap at 25 fields;
+        # keep well under that and note any overflow.
+        SHOW = 9
+        for i, (bullet, val) in enumerate(zip(self.bullets, self.values)):
+            if i >= SHOW:
+                embed.add_field(
+                    name=f"…and {total - SHOW} more",
+                    value="Use the **📊 Add metrics** pages to fill them.",
+                    inline=False,
+                )
+                break
+            if val == _SKIP:
+                mark, status = "➖", "skipped"
+            elif val:
+                mark, status = "✅", f"added **{val}**"
+            else:
+                mark, status = "⬜", "needs a number"
+            # In a filled/skipped bullet, show the real value in place of ____.
+            preview = bullet
+            if val and val != _SKIP:
+                preview = bullet.replace("____", f"**{val}**", 1)
+            elif val == _SKIP:
+                preview = re.sub(r"(?i)\s*as measured by\s*____", "", bullet)
+            preview = (preview[:150] + "…") if len(preview) > 151 else preview
+            embed.add_field(
+                name=f"{mark} {i + 1}. {status}",
+                value=preview or "*(bullet)*",
+                inline=False,
+            )
+        embed.set_footer(text="AI-generated • review before using")
+        return embed
+
+    def _build_buttons(self):
+        self.clear_items()
+        pending = self.n_pending
+        total = self.n_total
+        if pending:
+            # One "add" button per page of blanks (usually just one).
+            n_pages = (total + _MODAL_PAGE - 1) // _MODAL_PAGE
+            for p in range(n_pages):
+                start = p * _MODAL_PAGE
+                # Only show a page button if it still has an untouched blank.
+                if not any(
+                    self.values[j] == "" for j in range(start, min(start + _MODAL_PAGE, total))
+                ):
+                    continue
+                if n_pages == 1:
+                    label = f"Add metrics ({pending} left)"
+                else:
+                    label = f"Metrics {start + 1}-{min(start + _MODAL_PAGE, total)}"
+                btn = discord.ui.Button(
+                    label=label, emoji="📊", style=discord.ButtonStyle.primary
+                )
+                btn.callback = self._make_add_cb(start)
+                self.add_item(btn)
+
+        download = discord.ui.Button(
+            label="Download PDF", emoji="📄", style=discord.ButtonStyle.success
+        )
+        download.callback = self._on_download
+        self.add_item(download)
+
+        if pending:
+            skip = discord.ui.Button(
+                label="Skip rest & build", emoji="⏭️", style=discord.ButtonStyle.secondary
+            )
+            skip.callback = self._on_skip_rest
+            self.add_item(skip)
+
+    def _make_add_cb(self, start):
+        async def cb(interaction):
+            await interaction.response.send_modal(MetricsModal(self, start))
+        return cb
+
+    # --- actions ----------------------------------------------------------
+    async def refresh(self, interaction):
+        """Rebuild the PDF from current values and re-render the status board."""
+        self._build_buttons()
+        await self._send(interaction)
+
+    async def _on_download(self, interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._send(interaction)
+
+    async def _on_skip_rest(self, interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        for i, v in enumerate(self.values):
+            if v == "":
+                self.values[i] = _SKIP
+        self._build_buttons()
+        await self._send(interaction)
+
+    async def _send(self, interaction):
+        yaml_text = self.current_yaml()
+        pdf = await asyncio.to_thread(_build_pdf_sync, yaml_text)
+        embed = self.status_embed()
+        if pdf:
+            self.last_pdf = pdf
+            file = discord.File(io_bytes(pdf), filename=f"resume_{self.safe_company}.pdf")
         else:
             file = discord.File(
-                io_bytes(self.yaml_text.encode("utf-8")),
+                io_bytes(yaml_text.encode("utf-8")),
                 filename=f"tailored_resume_{self.safe_company}.yaml",
             )
-            await interaction.followup.send(
-                content="The PDF builder is unavailable right now — here's the YAML. "
-                "Try **Build PDF** again in a moment.",
-                file=file,
-                view=self,
-                ephemeral=True,
+            embed.add_field(
+                name="⚠️ Builder offline",
+                value="Couldn't reach the PDF builder — here's the YAML. "
+                "Press **Download PDF** to retry.",
+                inline=False,
             )
+        await interaction.followup.send(
+            embed=embed, file=file, view=self, ephemeral=True
+        )
 
 
 async def run_tailor(db, user, table, row_id):
@@ -814,6 +969,18 @@ async def run_tailor(db, user, table, row_id):
 
     # Fast path: rewrite only the bullets against the stored structured resume.
     structured = await asyncio.to_thread(resume_utils.get_structured, db, uid)
+    if not structured:
+        # Self-heal: priming may have failed (busy AI). Build the structure now
+        # from the stored text and persist it, so every future Tailor is fast.
+        text = await asyncio.to_thread(resume_utils.get_resume_text, db, uid)
+        if text:
+            structured = await asyncio.to_thread(
+                resume_utils.parse_structured, text, None
+            )
+            if structured:
+                await asyncio.to_thread(
+                    resume_utils.store_structured, db, uid, structured
+                )
     if structured:
         yaml_text = await asyncio.to_thread(_tailor_yaml_fast, structured, row)
 
@@ -840,40 +1007,24 @@ async def run_tailor(db, user, table, row_id):
         return None, None, None, "The AI couldn't tailor your resume right now — try again later."
 
     company = row.get("company_name") or "role"
-    n_placeholders = yaml_text.count(_METRIC_TOKEN)
 
-    # Build the initial PDF preview (1-page). The view lets the user fill in the
-    # [ADD METRIC] blanks via a modal and rebuild.
-    view = TailorView(yaml_text, company, n_placeholders)
-    pdf = await asyncio.to_thread(_build_pdf_sync, yaml_text)
-    safe = view.safe_company
+    # The view owns the status board, the [ADD METRIC] workflow, and rebuilds.
+    view = TailorView(yaml_text, company)
+    pdf = await asyncio.to_thread(_build_pdf_sync, view.current_yaml())
+    embed = view.status_embed()
 
     if pdf:
-        primary = discord.File(io_bytes(pdf), filename=f"resume_{safe}.pdf")
-        built_line = "Your **1-page** tailored resume — preview below, click to download."
+        view.last_pdf = pdf
+        primary = discord.File(io_bytes(pdf), filename=f"resume_{view.safe_company}.pdf")
     else:
         primary = discord.File(
-            io_bytes(yaml_text.encode("utf-8")),
-            filename=f"tailored_resume_{safe}.yaml",
+            io_bytes(view.current_yaml().encode("utf-8")),
+            filename=f"tailored_resume_{view.safe_company}.yaml",
         )
-        built_line = (
-            "The PDF builder is unavailable right now — here's the YAML. "
-            "Press **Build PDF** to retry."
+        embed.add_field(
+            name="⚠️ Builder offline",
+            value="Couldn't reach the PDF builder — here's the YAML. "
+            "Press **Download PDF** to retry.",
+            inline=False,
         )
-
-    desc = (
-        f"{built_line}\nReworded for this posting and ATS-optimized. "
-        "**Only your real content was used — nothing was invented.**\n"
-        "*AI-generated — review before using.*"
-    )
-    if n_placeholders:
-        desc += (
-            f"\n\n⚠️ **{n_placeholders}× `[ADD METRIC]`** — the AI never makes up "
-            "numbers. Press **📊 Add metrics** to fill them, then it rebuilds."
-        )
-    embed = discord.Embed(
-        title=f"✍️ Tailored resume — {company}"[:256],
-        description=desc,
-        color=discord.Color.blurple(),
-    )
     return embed, primary, view, None
