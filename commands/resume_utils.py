@@ -148,3 +148,61 @@ def image_bytes(db, user_uuid) -> bytes | None:
     except Exception:
         logger.exception("Failed downloading resume image for %s", user_uuid)
         return None
+
+
+# --- One-time text extraction (so AI commands can run text-only) -----------
+
+_EXTRACT_PROMPT = (
+    "Transcribe this resume into clean, complete plain text, VERBATIM. Preserve "
+    "every section (contact, education, experience, projects, skills, "
+    "achievements, publications, certifications) with all bullets, dates, "
+    "numbers, links, and details exactly as written, in reading order. Do NOT "
+    "summarize, rephrase, add, or omit anything — copy the real content only. "
+    "Output the resume text only, no commentary, no markdown fences."
+)
+
+
+def extract_text(image_png: bytes) -> str | None:
+    """Vision-transcribe the rendered resume PNG to plain text. Run ONCE at
+    upload; downstream AI commands reuse the text and skip vision entirely."""
+    from commands import gemma_client
+
+    text = gemma_client.ask_with_image(image_png, _EXTRACT_PROMPT)
+    return (text or "").strip() or None
+
+
+def get_resume_text(db, user_uuid) -> str | None:
+    """The stored resume text (from the one-time extraction), or None."""
+    row = get_resume(db, user_uuid)
+    if not row:
+        return None
+    return (row.get("extracted_text") or "").strip() or None
+
+
+def store_text(db, user_uuid, text: str) -> None:
+    """Persist the extracted resume text. Best-effort."""
+    try:
+        db.supabase.table("resumes").update({"extracted_text": text}).eq(
+            "user_id", user_uuid
+        ).execute()
+    except Exception:
+        logger.exception("Failed storing resume text for %s", user_uuid)
+
+
+def get_review(db, user_uuid) -> dict | None:
+    """The precomputed /reviewresume result, or None."""
+    row = get_resume(db, user_uuid)
+    if not row:
+        return None
+    r = row.get("review_json")
+    return r if isinstance(r, dict) else None
+
+
+def store_review(db, user_uuid, review: dict) -> None:
+    """Persist a precomputed resume review. Best-effort."""
+    try:
+        db.supabase.table("resumes").update({"review_json": review}).eq(
+            "user_id", user_uuid
+        ).execute()
+    except Exception:
+        logger.exception("Failed storing resume review for %s", user_uuid)

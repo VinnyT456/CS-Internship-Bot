@@ -74,6 +74,9 @@ CLOSED_CHECK_WORKERS = int(os.getenv("CLOSED_CHECK_WORKERS", "2"))
 CHANNEL_CACHE = {}
 SEARCH_URL_CACHE = {}
 BOT_AVATAR_URL = None
+# Interaction ids already handled — guards against Discord's duplicate
+# component dispatch causing a double ack (40060).
+_HANDLED_INTERACTIONS = set()
 COMMANDS_SYNCED = False
 
 
@@ -761,16 +764,22 @@ def _current_expanded(message):
 
 
 async def _run_job_ai(interaction, action, table, row_id):
-    """Shared body for the Score/Tailor buttons. Defers ephemerally (Gemma
-    takes seconds), runs the AI, sends the result embed or an error."""
-    if interaction.response.is_done():
-        return
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    """Shared body for the Score/Tailor buttons. The interaction was already
+    deferred in on_interaction; this just runs the AI and sends the result.
+    Fallback-defers only if that somehow didn't happen."""
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.HTTPException:
+            logger.warning("Score/Tailor interaction could not be deferred")
+            return
 
     runner = job_ai.run_score if action == "score" else job_ai.run_tailor
-    embed, error = await runner(get_db(), interaction.user, table, row_id)
+    embed, file, error = await runner(get_db(), interaction.user, table, row_id)
     if error:
         await interaction.followup.send(error, ephemeral=True)
+    elif file is not None:
+        await interaction.followup.send(embed=embed, file=file, ephemeral=True)
     else:
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1329,14 +1338,42 @@ subscribe_cmd.register(bot, get_db=get_db, logger=logger)
 
 
 @bot.event
-async def on_interaction(interaction):  
-    if interaction.type is discord.InteractionType.component:
-        custom_id = (interaction.data or {}).get("custom_id", "")
-        if custom_id.startswith("jobsec:"):
-            try:
-                await handle_section_button(interaction)
-            except Exception:
-                logger.exception("Section button handler failed")
+async def on_interaction(interaction):
+    if interaction.type is not discord.InteractionType.component:
+        return
+    custom_id = (interaction.data or {}).get("custom_id", "")
+    if not custom_id.startswith("jobsec:"):
+        return
+
+    # Discord can deliver the same component interaction more than once (gateway
+    # resume / duplicate dispatch). Each delivery is a fresh Interaction object,
+    # so `response.is_done()` can't see the earlier ack — that's the 40060
+    # "already acknowledged". Dedupe by interaction id instead.
+    if interaction.id in _HANDLED_INTERACTIONS:
+        return
+    _HANDLED_INTERACTIONS.add(interaction.id)
+    if len(_HANDLED_INTERACTIONS) > 1000:
+        _HANDLED_INTERACTIONS.clear()
+
+    # Score/Tailor take seconds (Gemma) — ack immediately, as the very first
+    # await, so the 3s interaction token can't expire before the handler runs.
+    # more/save respond their own way and aren't pre-acked.
+    action = custom_id.split(":")[1] if ":" in custom_id else ""
+    if action in ("score", "tailor"):
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.NotFound:
+            logger.warning("jobsec interaction expired before defer")
+            return
+        except discord.HTTPException as e:
+            if getattr(e, "code", None) == 40060:
+                return
+            logger.exception("Failed early defer for jobsec button")
+            return
+    try:
+        await handle_section_button(interaction)
+    except Exception:
+        logger.exception("Section button handler failed")
 
 
 @bot.event
@@ -1378,6 +1415,13 @@ async def on_ready():
 
     if not check_closed_status.is_running():
         check_closed_status.start()
+
+    # Warm the Gemma client so the first AI command isn't cold.
+    try:
+        from commands import gemma_client
+        asyncio.create_task(asyncio.to_thread(gemma_client.warm_up))
+    except Exception:
+        logger.exception("Failed scheduling Gemma warm-up")
 
     logger.info("Bot ready as %s", bot.user)
 

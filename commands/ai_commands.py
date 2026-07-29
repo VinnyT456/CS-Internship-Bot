@@ -66,6 +66,55 @@ def _job_context(row):
     return "\n".join(p for p in parts if p)
 
 
+# --- Resume review (precomputed at upload; JSON so it renders as fields) ----
+
+_REVIEW_PROMPT = (
+    "You are a hiring manager with 20 years of experience in tech who also "
+    "tunes the ATS that screen resumes. Review this candidate's resume. Base "
+    "everything on what the resume actually shows; invent nothing.\n\n"
+    "Return ONLY this JSON, flat string arrays only:\n"
+    "{\n"
+    '  "impression": "<2-sentence overall impression>",\n'
+    '  "strengths": ["<top strength>"],\n'
+    '  "improvements": ["<concrete fix: wording, formatting, missing content, quantified impact>"],\n'
+    '  "ats_gaps": ["<ATS/keyword gap for software-tech roles>"]\n'
+    "}\n"
+    "Caps: strengths<=3, improvements<=5, ats_gaps<=4. Keep items short."
+)
+
+
+def compute_review(text, img):
+    """Compute the resume-review JSON from resume text (preferred) or image.
+    Returns dict or None. Safe to call off-thread."""
+    if text:
+        prompt = f"{_REVIEW_PROMPT}\n\n<resume>\n{text}\n</resume>"
+        return gemma_client.ask_json_text(prompt, 3000)
+    if img:
+        return gemma_client.ask_json_with_image(img, _REVIEW_PROMPT, 3000)
+    return None
+
+
+def _review_embed(data):
+    embed = discord.Embed(title="📝 Resume Review", color=discord.Color.green())
+    imp = str(data.get("impression") or "").strip()
+    if imp:
+        embed.description = imp[:4096]
+    for name, key in (
+        ("✅ Strengths", "strengths"),
+        ("🔧 Improvements", "improvements"),
+        ("🤖 ATS / keyword gaps", "ats_gaps"),
+    ):
+        items = data.get(key)
+        if isinstance(items, list) and items:
+            block = "\n".join(
+                f"• {str(x).strip()}" for x in items[:5] if str(x).strip()
+            )
+            if block:
+                embed.add_field(name=name, value=block[:1024], inline=False)
+    embed.set_footer(text="AI-generated • verify before relying on it")
+    return embed
+
+
 def register(bot, *, get_db, logger=None):
     lg = logger or log
 
@@ -94,32 +143,37 @@ def register(bot, *, get_db, logger=None):
     )
     async def reviewresume(interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        _uid, img = await _resume_image(interaction)
-        if not img:
+        db = get_db()
+        user = interaction.user
+        uid = await asyncio.to_thread(
+            db.get_or_create_user, user.id, user.name, user.display_name
+        )
+        if not uid:
             await _need_resume_msg(interaction)
             return
 
-        prompt = (
-            "You are an expert technical recruiter and resume reviewer. This "
-            "image is a candidate's resume. Give concise, actionable feedback:\n"
-            "1. Overall impression (2 sentences).\n"
-            "2. Top 3 strengths.\n"
-            "3. Top 5 concrete improvements (formatting, wording, missing "
-            "content, quantified impact).\n"
-            "4. ATS/keyword gaps for software/tech roles.\n"
-            "Be specific and honest. Use short bullet points."
-        )
-        answer = await asyncio.to_thread(gemma_client.ask_with_image, img, prompt)
-        if not answer:
+        # Precomputed at upload → instant.
+        data = await asyncio.to_thread(resume_utils.get_review, db, uid)
+        if data is None:
+            # Not primed yet: compute from stored text (fast) or the image.
+            text = await asyncio.to_thread(resume_utils.get_resume_text, db, uid)
+            img = None
+            if not text:
+                img = await asyncio.to_thread(resume_utils.image_bytes, db, uid)
+                if not img:
+                    await _need_resume_msg(interaction)
+                    return
+            data = await asyncio.to_thread(compute_review, text, img)
+            if data:
+                await asyncio.to_thread(resume_utils.store_review, db, uid, data)
+
+        if not data:
             await interaction.followup.send(
                 "The AI couldn't review your resume right now — try again later.",
                 ephemeral=True,
             )
             return
-        await interaction.followup.send(
-            embed=_answer_embed("📝 Resume Review", answer, discord.Color.green()),
-            ephemeral=True,
-        )
+        await interaction.followup.send(embed=_review_embed(data), ephemeral=True)
 
     # ---- /match ----------------------------------------------------------
     @bot.tree.command(

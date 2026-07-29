@@ -85,11 +85,15 @@ class JobBrowser(discord.ui.View):
             await interaction.response.defer(ephemeral=True, thinking=True)
             runner = job_ai.run_score if action == "score" else job_ai.run_tailor
             row_id = self._row().get("id")
-            embed, error = await runner(
+            embed, file, error = await runner(
                 self.get_db(), interaction.user, self._row_table(), row_id
             )
             if error:
                 await interaction.followup.send(error, ephemeral=True)
+            elif file is not None:
+                await interaction.followup.send(
+                    embed=embed, file=file, ephemeral=True
+                )
             else:
                 await interaction.followup.send(embed=embed, ephemeral=True)
 

@@ -34,6 +34,50 @@ class SupabaseDatabase:
         self.repo_table = "repo_info"
         self.users_table = "users"
         self.saved_jobs_table = "saved_jobs"
+        self.score_cache_table = "score_cache"
+
+    # --- Score cache ---------------------------------------------------
+    def get_cached_score(self, user_uuid, job_table, job_id):
+        """The cached Score JSON for (user, job), or None."""
+        try:
+            data = (
+                self.supabase.table(self.score_cache_table)
+                .select("result")
+                .eq("user_id", user_uuid)
+                .eq("job_table", job_table)
+                .eq("job_id", int(job_id))
+                .limit(1)
+                .execute()
+                .data
+            )
+            return data[0]["result"] if data else None
+        except Exception:
+            self.logger.exception("Failed reading score cache")
+            return None
+
+    def set_cached_score(self, user_uuid, job_table, job_id, result):
+        """Upsert a Score result for (user, job). Best-effort."""
+        try:
+            self.supabase.table(self.score_cache_table).upsert(
+                {
+                    "user_id": user_uuid,
+                    "job_table": job_table,
+                    "job_id": int(job_id),
+                    "result": result,
+                },
+                on_conflict="user_id,job_table,job_id",
+            ).execute()
+        except Exception:
+            self.logger.exception("Failed writing score cache")
+
+    def clear_score_cache(self, user_uuid):
+        """Drop all cached scores for a user — call when their resume changes."""
+        try:
+            self.supabase.table(self.score_cache_table).delete().eq(
+                "user_id", user_uuid
+            ).execute()
+        except Exception:
+            self.logger.exception("Failed clearing score cache for %s", user_uuid)
 
     def get_or_create_user(self, discord_id, username=None, display_name=None):
         """Return the users.id UUID for a Discord member, inserting the row on

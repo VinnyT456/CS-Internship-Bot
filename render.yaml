@@ -1,0 +1,63 @@
+# Render blueprint: deploys the Discord bot and the resume-build microservice
+# together. Import via Render Dashboard → Blueprints → New Blueprint Instance,
+# pointed at this repo. Secrets marked `sync: false` are prompted for on first
+# apply (or set them in each service's Environment tab).
+services:
+  # --- The Discord bot (native Python) --------------------------------------
+  - type: web
+    name: cs-internship-bot
+    runtime: python
+    plan: free
+    pythonVersion: "3.14"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: WELCOME_CHANNEL_ID
+        sync: false
+      - key: INTERNSHIPS_CHANNEL_ID
+        sync: false
+      - key: NEW_GRADS_CHANNEL_ID
+        sync: false
+      - key: COMMANDS_CHANNEL_ID
+        sync: false
+      # Wire the bot to the build service below. RESUME_BUILD_URL is filled in
+      # automatically from that service's URL; the token is shared via a group.
+      # Render injects the service's hostname; the bot prepends https://.
+      - key: RESUME_BUILD_URL
+        fromService:
+          type: web
+          name: resume-build
+          property: host
+      # Same shared token the service checks (bot reads BUILD_TOKEN too).
+      - key: BUILD_TOKEN
+        fromGroup: resume-build-secrets
+
+  # --- The resume-build microservice (Docker + tectonic) --------------------
+  - type: web
+    name: resume-build
+    runtime: docker
+    plan: free
+    dockerfilePath: ./resume_service/Dockerfile
+    dockerContext: ./resume_service
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: BUILD_TOKEN
+        fromGroup: resume-build-secrets
+
+# Shared bearer token so the bot and the service agree.
+envVarGroups:
+  - name: resume-build-secrets
+    envVars:
+      - key: BUILD_TOKEN
+        generateValue: true      # Render generates a random token, shared by both

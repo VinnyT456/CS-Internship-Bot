@@ -5,6 +5,31 @@ import discord
 
 from commands import resume_utils
 
+log = logging.getLogger("cs_internship_bot")
+
+
+async def _prime_resume(db, uuid):
+    """After an upload: transcribe the resume to text once (so later AI calls go
+    text-only) and precompute the review. Runs in the background; best-effort."""
+    try:
+        img = await asyncio.to_thread(resume_utils.image_bytes, db, uuid)
+        if not img:
+            return
+        text = await asyncio.to_thread(resume_utils.extract_text, img)
+        if text:
+            await asyncio.to_thread(resume_utils.store_text, db, uuid, text)
+
+        # Precompute /reviewresume from the text (or image) so it's instant.
+        from commands import ai_commands
+
+        review = await asyncio.to_thread(
+            ai_commands.compute_review, text, img
+        )
+        if review:
+            await asyncio.to_thread(resume_utils.store_review, db, uuid, review)
+    except Exception:
+        log.exception("Resume priming failed for %s", uuid)
+
 
 def register(bot, *, get_db, logger=None):
     """Register /resume — upload, view, or remove your resume (PDF only).
@@ -52,6 +77,8 @@ def register(bot, *, get_db, logger=None):
             await asyncio.to_thread(
                 resume_utils.process_and_store, db, uuid, pdf_bytes, file.filename
             )
+            # New resume invalidates any cached match scores.
+            await asyncio.to_thread(db.clear_score_cache, uuid)
         except resume_utils.ResumeError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
             return
@@ -64,9 +91,14 @@ def register(bot, *, get_db, logger=None):
 
         await interaction.followup.send(
             f"✅ Resume uploaded — **{discord.utils.escape_markdown(file.filename)}**. "
-            "It's ready for /match, /reviewresume, and recommendations.",
+            "Warming it up for /match, /reviewresume, and recommendations…",
             ephemeral=True,
         )
+
+        # Precompute in the background so the reply isn't blocked: transcribe the
+        # resume to text once (lets later AI calls skip vision) and cache the
+        # review. Best-effort — failures just mean the first command is slower.
+        asyncio.create_task(_prime_resume(db, uuid))
 
     @group.command(name="view", description="See your current resume")
     async def view(interaction: discord.Interaction):
@@ -115,6 +147,8 @@ def register(bot, *, get_db, logger=None):
             if uuid
             else False
         )
+        if removed:
+            await asyncio.to_thread(db.clear_score_cache, uuid)
         await interaction.followup.send(
             "🗑️ Resume removed." if removed else "You have no resume to remove.",
             ephemeral=True,
