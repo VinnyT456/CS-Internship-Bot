@@ -97,7 +97,7 @@ def _build_one_page_pdf(data: dict) -> bytes:
     last_pdf = None
     for params in _ONE_PAGE_LEVELS:
         try:
-            latex = render_template(data, params)
+            latex = _sanitize_latex(render_template(data, params))
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Render error: {exc}")
         pdf = _compile_with_tectonic(latex)
@@ -106,6 +106,26 @@ def _build_one_page_pdf(data: dict) -> bytes:
             return pdf
     # Nothing fit a single page — return the most compact attempt.
     return last_pdf
+
+
+# pdfTeX-only primitives the template emits for ATS glyph tagging. tectonic
+# (XeTeX-based) doesn't implement them and halts — strip them; they only affect
+# PDF text-extraction metadata, not the visible resume.
+_INCOMPATIBLE_LATEX = (
+    r"\input{glyphtounicode}",
+    r"\pdfgentounicode=1",
+)
+
+
+def _sanitize_latex(latex: str) -> str:
+    """Remove pdfTeX-only lines that tectonic can't compile."""
+    out = []
+    for line in latex.splitlines():
+        stripped = line.strip()
+        if any(stripped == bad or stripped.startswith(bad) for bad in _INCOMPATIBLE_LATEX):
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 @app.api_route("/", methods=["GET", "HEAD"])
