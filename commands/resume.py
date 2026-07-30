@@ -76,8 +76,38 @@ async def prime_resume(db, uuid, *, force=False):
             await asyncio.to_thread(resume_utils.store_review, db, uuid, review)
             status["review"] = True
 
+    # 4. Pre-tailor the newest few postings so the first Tailor click is instant.
+    if status["structured"] or status["text"]:
+        await _pretailor_newest(db, uuid, n=3)
+
     log.info("prime_resume %s -> %s", uuid, status)
     return status
+
+
+async def _pretailor_newest(db, uuid, n=3):
+    """Background: tailor + cache the newest N open internships for this user."""
+    from commands import job_ai
+
+    try:
+        rows = (
+            db.supabase.table("internships")
+            .select("id")
+            .eq("is_closed", False)
+            .not_.is_("job_summary", "null")
+            .order("job_posted_at", desc=True)
+            .limit(n)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        log.exception("pretailor: failed listing newest internships")
+        return
+    for r in rows:
+        try:
+            await job_ai.pretailor_job(db, uuid, "internships", r["id"])
+        except Exception:
+            log.exception("pretailor job %s failed", r.get("id"))
 
 
 # Back-compat alias for the background task.
@@ -130,8 +160,9 @@ def register(bot, *, get_db, logger=None):
             await asyncio.to_thread(
                 resume_utils.process_and_store, db, uuid, pdf_bytes, file.filename
             )
-            # New resume invalidates any cached match scores.
+            # New resume invalidates any cached match scores and tailors.
             await asyncio.to_thread(db.clear_score_cache, uuid)
+            await asyncio.to_thread(db.clear_tailor_cache, uuid)
         except resume_utils.ResumeError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
             return
@@ -224,6 +255,7 @@ def register(bot, *, get_db, logger=None):
         )
         if removed:
             await asyncio.to_thread(db.clear_score_cache, uuid)
+            await asyncio.to_thread(db.clear_tailor_cache, uuid)
         await interaction.followup.send(
             "🗑️ Resume removed." if removed else "You have no resume to remove.",
             ephemeral=True,

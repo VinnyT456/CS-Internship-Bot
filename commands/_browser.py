@@ -83,22 +83,35 @@ class JobBrowser(discord.ui.View):
                 )
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
-            runner = job_ai.run_score if action == "score" else job_ai.run_tailor
             row_id = self._row().get("id")
-            embed, file, view, error = await runner(
-                self.get_db(), interaction.user, self._row_table(), row_id
+            if action == "score":
+                embed, file, view, error = await job_ai.run_score(
+                    self.get_db(), interaction.user, self._row_table(), row_id
+                )
+                if error:
+                    await interaction.followup.send(error, ephemeral=True)
+                    return
+                kwargs = {"ephemeral": True}
+                if embed is not None:
+                    kwargs["embed"] = embed
+                if file is not None:
+                    kwargs["file"] = file
+                if view is not None:
+                    kwargs["view"] = view
+                await interaction.followup.send(**kwargs)
+                return
+
+            progress = job_ai.make_progress_updater(interaction)
+            embed, file, view, error = await job_ai.run_tailor(
+                self.get_db(), interaction.user, self._row_table(), row_id,
+                progress=progress,
             )
             if error:
-                await interaction.followup.send(error, ephemeral=True)
+                await interaction.edit_original_response(
+                    content=error, embed=None, view=None
+                )
                 return
-            kwargs = {"ephemeral": True}
-            if embed is not None:
-                kwargs["embed"] = embed
-            if file is not None:
-                kwargs["file"] = file
-            if view is not None:
-                kwargs["view"] = view
-            await interaction.followup.send(**kwargs)
+            await job_ai.deliver_tailor(interaction, embed, file, view)
 
         button.callback = cb
         return button

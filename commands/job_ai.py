@@ -603,9 +603,9 @@ slot as the literal placeholder "[ADD METRIC]".
 </truth_rules>
 
 <output_format>
-Return ONLY a JSON array of the rewritten bullet strings, same length and order \
-as the input list. No keys, no prose.
-Example: ["Rewrote bullet 1 ...", "Rewrote bullet 2 ..."]
+Output ONLY the rewritten bullets, one per line, each prefixed with its number \
+and a period (e.g. "1. ..."). Same count and order as the input. No JSON, no \
+headers, no commentary.
 </output_format>
 
 <bullets>
@@ -649,30 +649,177 @@ def _splice_bullets(structured, locators, rewritten):
     return out
 
 
-def _tailor_yaml_fast(structured, row):
-    """Fast path: rewrite only the bullets via one small Gemma call, splice them
-    into the stored structure, and dump YAML. Returns YAML str or None. Blocking
-    — call via asyncio.to_thread."""
+_BULLET_CHUNK = 4  # small batches: the free tier 503s / stalls on big outputs
+
+
+def _parse_numbered(text, expected):
+    """Parse '1. ...\\n2. ...' plain-text output into a list of `expected`
+    bullets, in order. Tolerates missing numbers / wrapped lines."""
+    if not text:
+        return []
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"^\s*(\d+)[.)]\s*(.*)$", line)
+        if m:
+            out.append(m.group(2).strip().strip('"').strip("-").strip())
+        elif out:
+            # Continuation of the previous bullet.
+            out[-1] = (out[-1] + " " + line).strip()
+    return out[:expected]
+
+
+def _rewrite_chunk(posting_ctx, chunk):
+    """Rewrite a small batch of bullets (plain text). Returns list aligned to the
+    chunk, falling back to originals on any shortfall. Blocking."""
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(chunk))
+    prompt = _BULLET_REWRITE_PROMPT.format(posting=posting_ctx, bullets=numbered)
+    # Bullet rewriting is high-volume mechanical work — FAST tier (Flash-lite).
+    text = gemma_client.ask_text(prompt, chain=gemma_client.FAST_CHAIN)
+    parsed = _parse_numbered(text, len(chunk))
+    # Align length: keep original where the model dropped one.
+    out = []
+    for i, original in enumerate(chunk):
+        out.append(parsed[i] if i < len(parsed) and parsed[i] else original)
+    return out
+
+
+async def _tailor_yaml_fast(structured, row, progress=None):
+    """Fast path: rewrite bullets in small concurrent batches (plain text — the
+    free tier stalls/503s on one big JSON call), splice back, dump YAML. Returns
+    YAML str or None. `progress(done, total)` is awaited as each batch finishes.
+    """
     import yaml as _yaml
 
     locators, texts = _collect_bullets(structured)
     if not texts:
-        # Nothing to rewrite — just serialize the stored structure.
         return _yaml.safe_dump(structured, sort_keys=False, allow_unicode=True)
 
-    numbered = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(texts))
-    prompt = _BULLET_REWRITE_PROMPT.format(
-        posting=_job_context(row), bullets=numbered
+    posting_ctx = _job_context(row)
+    chunks = [texts[i : i + _BULLET_CHUNK] for i in range(0, len(texts), _BULLET_CHUNK)]
+    total = len(chunks)
+
+    if progress:
+        await progress(0, total)
+
+    # Each batch is its own thread task. A shared counter reports progress as
+    # each finishes; results are indexed so splicing stays in order.
+    results = [None] * total
+    done = 0
+    lock = asyncio.Lock()
+
+    async def run_chunk(idx, chunk):
+        nonlocal done
+        results[idx] = await asyncio.to_thread(_rewrite_chunk, posting_ctx, chunk)
+        async with lock:
+            done += 1
+            if progress:
+                await progress(done, total)
+
+    await asyncio.gather(
+        *(run_chunk(idx, chunk) for idx, chunk in enumerate(chunks))
     )
-    data = gemma_client.ask_json_text(prompt, 2000)
-    if not isinstance(data, list) or not data:
+
+    rewritten = []
+    for r in results:
+        if r:
+            rewritten.extend(r)
+
+    if not rewritten:
         return None
-    tailored = _splice_bullets(structured, locators, data)
+    tailored = _splice_bullets(structured, locators, rewritten)
     return _yaml.safe_dump(tailored, sort_keys=False, allow_unicode=True)
 
 
 _METRIC_TOKEN = "[ADD METRIC]"
 _MODAL_PAGE = 5  # Discord modal hard limit is 5 inputs
+
+
+def progress_bar(done, total, width=12):
+    """A text progress bar like '▰▰▰▱▱▱▱▱ 3/8'."""
+    total = max(1, total)
+    filled = round(done / total * width)
+    pct = round(done / total * 100)
+    return f"{'▰' * filled}{'▱' * (width - filled)}  {pct}%  ({done}/{total})"
+
+
+def make_progress_updater(interaction, verb="Tailoring your resume"):
+    """Return an async progress(done, total) that edits the interaction's
+    deferred response with a status line + live bar. Failure-tolerant."""
+    async def progress(done, total):
+        bar = progress_bar(done, total)
+        content = (
+            f"✍️ **{verb}…** — we'll **DM** you the finished resume when it's ready. "
+            "You can close this.\n"
+            f"{bar}"
+        )
+        try:
+            await interaction.edit_original_response(content=content, embed=None)
+        except Exception:
+            pass  # a dropped progress edit must never break the actual work
+    return progress
+
+
+async def deliver_tailor(interaction, embed, file, view):
+    """Deliver a finished tailor: DM the PDF/embed to the user, then collapse the
+    ephemeral progress message to a short confirmation. Falls back to the
+    ephemeral message if DMs are closed."""
+    import discord
+
+    user = interaction.user
+    dmed = False
+    try:
+        dm = await user.create_dm()
+        kwargs = {}
+        if embed is not None:
+            kwargs["embed"] = embed
+        if file is not None:
+            kwargs["file"] = file
+        if view is not None:
+            kwargs["view"] = view
+        await dm.send(**kwargs)
+        dmed = True
+    except (discord.Forbidden, discord.HTTPException):
+        dmed = False
+    except Exception:
+        log.exception("Failed DMing tailored resume")
+        dmed = False
+
+    if dmed:
+        # Clear the ephemeral (only-you) progress — result now lives in DMs.
+        try:
+            await interaction.edit_original_response(
+                content="📬 Your tailored resume is in your **DMs**.",
+                embed=None,
+                attachments=[],
+                view=None,
+            )
+        except Exception:
+            pass
+        return
+
+    # DMs closed — send the result ephemerally instead (best effort).
+    kwargs = {"ephemeral": True}
+    if embed is not None:
+        kwargs["embed"] = embed
+    if file is not None:
+        kwargs["file"] = file
+    if view is not None:
+        kwargs["view"] = view
+    try:
+        await interaction.edit_original_response(
+            content="📎 Couldn't DM you (DMs closed) — here it is:",
+            embed=embed, attachments=[file] if file else [], view=view,
+        )
+    except Exception:
+        try:
+            await interaction.followup.send(
+                content="📎 Couldn't DM you (DMs closed) — here it is:", **kwargs
+            )
+        except Exception:
+            log.exception("Failed delivering tailor ephemerally")
 
 
 def _split_on_metrics(yaml_text):
@@ -950,10 +1097,10 @@ class TailorView(discord.ui.View):
         )
 
 
-async def run_tailor(db, user, table, row_id):
+async def run_tailor(db, user, table, row_id, progress=None):
     """Tailor the resume for this posting as YAML (for the downstream resume
-    builder). Returns (embed, file, error) — file is the .yaml attachment.
-    Uses the stored resume text when available (text-only, faster)."""
+    builder). Returns (embed, file, view, error). `progress(done, total)` is
+    awaited as bullet batches complete, so the caller can show a live bar."""
     row, uid = await asyncio.gather(
         asyncio.to_thread(_fetch_row, db, table, row_id),
         asyncio.to_thread(
@@ -965,13 +1112,26 @@ async def run_tailor(db, user, table, row_id):
     if not uid:
         return None, None, None, NEED_RESUME
 
-    yaml_text = None
+    # Cache: a repeat click (or a pre-tailored posting) returns instantly.
+    yaml_text = await asyncio.to_thread(db.get_cached_tailor, uid, table, row_id)
+    if yaml_text:
+        return await _finish_tailor(db, uid, table, row_id, row, yaml_text, store=False)
 
+    yaml_text = await _generate_tailor_yaml(db, uid, row, progress=progress)
+    if not yaml_text:
+        return None, None, None, "The AI couldn't tailor your resume right now — try again later."
+
+    return await _finish_tailor(db, uid, table, row_id, row, yaml_text, store=True)
+
+
+async def _generate_tailor_yaml(db, uid, row, progress=None):
+    """Produce tailored resume YAML for (uid, row): fast bullet-rewrite path over
+    the stored structure, else a full-resume fallback. Returns YAML str or None.
+    No caching / no Discord — shared by run_tailor and background pre-tailoring."""
     # Fast path: rewrite only the bullets against the stored structured resume.
     structured = await asyncio.to_thread(resume_utils.get_structured, db, uid)
     if not structured:
-        # Self-heal: priming may have failed (busy AI). Build the structure now
-        # from the stored text and persist it, so every future Tailor is fast.
+        # Self-heal: build + persist the structure now so future tailors are fast.
         text = await asyncio.to_thread(resume_utils.get_resume_text, db, uid)
         if text:
             structured = await asyncio.to_thread(
@@ -982,33 +1142,50 @@ async def run_tailor(db, user, table, row_id):
                     resume_utils.store_structured, db, uid, structured
                 )
     if structured:
-        yaml_text = await asyncio.to_thread(_tailor_yaml_fast, structured, row)
+        y = await _tailor_yaml_fast(structured, row, progress=progress)
+        if y:
+            return y
 
-    # Fallback: full-resume regeneration from text/image (also covers resumes
-    # uploaded before structuring existed).
-    if not yaml_text:
-        source = await _resume_source(db, uid)
-        if not source:
-            return None, None, None, NEED_RESUME
-        prompt = _TAILOR_PROMPT.format(posting=_job_context(row))
-        kind, payload = source
-        if kind == "text":
-            full = f"{prompt}\n\n<resume>\n{payload}\n</resume>"
-            answer = await asyncio.to_thread(gemma_client.ask_text, full)
-        else:
-            answer = await asyncio.to_thread(
-                gemma_client.ask_with_image, payload, prompt
-            )
-        if not answer:
-            return None, None, None, "The AI couldn't tailor your resume right now — try again later."
-        yaml_text = _strip_yaml_fence(answer)
+    # Fallback: full-resume regeneration from text/image.
+    source = await _resume_source(db, uid)
+    if not source:
+        return None
+    prompt = _TAILOR_PROMPT.format(posting=_job_context(row))
+    kind, payload = source
+    if kind == "text":
+        full = f"{prompt}\n\n<resume>\n{payload}\n</resume>"
+        answer = await asyncio.to_thread(
+            gemma_client.ask_text, full, gemma_client.FAST_CHAIN
+        )
+    else:
+        answer = await asyncio.to_thread(
+            gemma_client.ask_with_image, payload, prompt, gemma_client.FAST_CHAIN
+        )
+    return _strip_yaml_fence(answer) if answer else None
 
+
+async def pretailor_job(db, uid, table, row_id):
+    """Background pre-tailor: build + cache the tailored YAML for (uid, job) so a
+    later click is instant. Skips if already cached. Best-effort, returns bool."""
+    if await asyncio.to_thread(db.get_cached_tailor, uid, table, row_id):
+        return True
+    row = await asyncio.to_thread(_fetch_row, db, table, row_id)
+    if not row:
+        return False
+    yaml_text = await _generate_tailor_yaml(db, uid, row)
     if not yaml_text:
-        return None, None, None, "The AI couldn't tailor your resume right now — try again later."
+        return False
+    await asyncio.to_thread(db.set_cached_tailor, uid, table, row_id, yaml_text)
+    return True
+
+
+async def _finish_tailor(db, uid, table, row_id, row, yaml_text, *, store):
+    """Build the TailorView + initial PDF/embed from tailored YAML, caching the
+    YAML when freshly generated. Returns (embed, file, view, None)."""
+    if store:
+        await asyncio.to_thread(db.set_cached_tailor, uid, table, row_id, yaml_text)
 
     company = row.get("company_name") or "role"
-
-    # The view owns the status board, the [ADD METRIC] workflow, and rebuilds.
     view = TailorView(yaml_text, company)
     pdf = await asyncio.to_thread(_build_pdf_sync, view.current_yaml())
     embed = view.status_embed()

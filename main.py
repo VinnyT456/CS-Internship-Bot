@@ -774,19 +774,32 @@ async def _run_job_ai(interaction, action, table, row_id):
             logger.warning("Score/Tailor interaction could not be deferred")
             return
 
-    runner = job_ai.run_score if action == "score" else job_ai.run_tailor
-    embed, file, view, error = await runner(get_db(), interaction.user, table, row_id)
-    if error:
-        await interaction.followup.send(error, ephemeral=True)
+    if action == "score":
+        embed, file, view, error = await job_ai.run_score(
+            get_db(), interaction.user, table, row_id
+        )
+        if error:
+            await interaction.followup.send(error, ephemeral=True)
+            return
+        kwargs = {"ephemeral": True}
+        if embed is not None:
+            kwargs["embed"] = embed
+        if file is not None:
+            kwargs["file"] = file
+        if view is not None:
+            kwargs["view"] = view
+        await interaction.followup.send(**kwargs)
         return
-    kwargs = {"ephemeral": True}
-    if embed is not None:
-        kwargs["embed"] = embed
-    if file is not None:
-        kwargs["file"] = file
-    if view is not None:
-        kwargs["view"] = view
-    await interaction.followup.send(**kwargs)
+
+    # Tailor: show a live progress bar, then DM the result and clear the bar.
+    progress = job_ai.make_progress_updater(interaction)
+    embed, file, view, error = await job_ai.run_tailor(
+        get_db(), interaction.user, table, row_id, progress=progress
+    )
+    if error:
+        await interaction.edit_original_response(content=error, embed=None, view=None)
+        return
+    await job_ai.deliver_tailor(interaction, embed, file, view)
 
 
 async def _handle_score(interaction, table, row_id):

@@ -16,19 +16,38 @@ import time
 
 logger = logging.getLogger("cs_internship_bot")
 
-# Primary model, then a fallback to rotate to when the primary is overloaded.
-MODEL = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
-FALLBACK_MODEL = os.getenv("GEMMA_FALLBACK_MODEL", "gemma-4-31b-it")
+# Two model tiers routed by task importance:
+#   SMART — the "important" evaluative work (match scoring, review). Gemma leads,
+#           because we want its judgment; a Flash model backs it up when Gemma
+#           is overloaded so the command still returns.
+#   FAST  — mechanical/heavy work (extraction, structuring, bullet rewriting,
+#           YAML). Flash-lite leads (dramatically faster + steadier than the
+#           Gemma free tier); Gemma backs it up.
+GEMMA_MODEL = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
+GEMMA_MODEL_2 = os.getenv("GEMMA_FALLBACK_MODEL", "gemma-4-31b-it")
+FLASH_MODEL = os.getenv("FLASH_MODEL", "gemini-flash-lite-latest")
+FLASH_MODEL_2 = os.getenv("FLASH_MODEL_2", "gemini-3.1-flash-lite")
 
-# Models to try in order. Each is attempted with a couple of retries before
-# rotating to the next.
-_MODEL_CHAIN = [m for m in (MODEL, FALLBACK_MODEL) if m]
+def _chain(*models):
+    return list(dict.fromkeys([m for m in models if m]))
+
+SMART_CHAIN = _chain(GEMMA_MODEL, GEMMA_MODEL_2, FLASH_MODEL)
+FAST_CHAIN = _chain(FLASH_MODEL, FLASH_MODEL_2, GEMMA_MODEL)
+
+# Back-compat: the old single-model default (used where no tier is passed).
+MODEL = GEMMA_MODEL
+_MODEL_CHAIN = SMART_CHAIN
 
 _RETRIES_PER_MODEL = int(os.getenv("GEMMA_RETRIES", "2"))
 _RETRY_BASE_DELAY = float(os.getenv("GEMMA_RETRY_DELAY", "1.5"))
 
 # HTTP statuses worth retrying / rotating on (transient overload / server error).
 _TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
+# Exception type names that mean a transient network drop (retry-worthy).
+_TRANSIENT_EXC_NAMES = {
+    "RemoteProtocolError", "ReadTimeout", "ConnectTimeout", "ConnectError",
+    "ReadError", "WriteError", "PoolTimeout", "ServerError",
+}
 
 _client = None
 
@@ -51,16 +70,17 @@ def _status_of(exc):
     return None
 
 
-def _generate(contents, config=None):
-    """Call generate_content with retry + model rotation. Returns the response,
-    or raises the last error if every model/attempt fails.
+def _generate(contents, config=None, chain=None):
+    """Call generate_content with retry + model rotation over `chain` (defaults
+    to SMART_CHAIN). Returns the response, or raises the last error if every
+    model/attempt fails.
 
     Order: for each model in the chain, try up to _RETRIES_PER_MODEL times with
     exponential backoff on transient (429/5xx) errors; a non-transient error
     aborts immediately."""
     client = _get_client()
     last_exc = None
-    for model in _MODEL_CHAIN:
+    for model in (chain or SMART_CHAIN):
         for attempt in range(_RETRIES_PER_MODEL):
             try:
                 return client.models.generate_content(
@@ -69,7 +89,11 @@ def _generate(contents, config=None):
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 status = _status_of(exc)
-                transient = status in _TRANSIENT_STATUSES
+                exc_name = type(exc).__name__
+                transient = (
+                    status in _TRANSIENT_STATUSES
+                    or exc_name in _TRANSIENT_EXC_NAMES
+                )
                 if not transient:
                     # Real error (bad request, auth, etc.) — don't waste retries.
                     raise
@@ -87,10 +111,10 @@ def _generate(contents, config=None):
     raise RuntimeError("No Gemma model available")
 
 
-def ask_text(prompt: str) -> str | None:
+def ask_text(prompt: str, chain=None) -> str | None:
     """Text-only completion. Returns the response text, or None on failure."""
     try:
-        resp = _generate(prompt)
+        resp = _generate(prompt, chain=chain)
         return (resp.text or "").strip() or None
     except Exception:
         logger.exception("Gemma text call failed")
@@ -101,6 +125,7 @@ def ask_json_text(
     prompt: str,
     max_output_tokens: int = 4000,
     temperature: float = 0.2,
+    chain=None,
 ) -> dict | None:
     """Text-only completion constrained to strict JSON. Faster than the vision
     path — use when the resume is already available as text. Returns the parsed
@@ -115,6 +140,7 @@ def ask_json_text(
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
             ),
+            chain=chain,
         )
         text = (resp.text or "").strip()
         if not text and resp.candidates:
@@ -140,7 +166,7 @@ def warm_up() -> None:
         logger.exception("Gemma client warm-up failed")
 
 
-def ask_with_image(image_bytes: bytes, prompt: str) -> str | None:
+def ask_with_image(image_bytes: bytes, prompt: str, chain=None) -> str | None:
     """Vision completion — the resume PNG plus a prompt. Returns text or None."""
     try:
         from google.genai import types
@@ -149,7 +175,8 @@ def ask_with_image(image_bytes: bytes, prompt: str) -> str | None:
             [
                 types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
                 prompt,
-            ]
+            ],
+            chain=chain,
         )
         return (resp.text or "").strip() or None
     except Exception:
@@ -162,6 +189,7 @@ def ask_json_with_image(
     prompt: str,
     max_output_tokens: int = 4000,
     temperature: float = 0.2,
+    chain=None,
 ) -> dict | None:
     """Vision completion constrained to strict JSON — faster and directly
     parseable (no regex scraping). Gemma has no 'thinking' mode to disable;
@@ -182,6 +210,7 @@ def ask_json_with_image(
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
             ),
+            chain=chain,
         )
         text = (resp.text or "").strip()
         # On MAX_TOKENS the .text accessor can come back empty even though the

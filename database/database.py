@@ -35,6 +35,7 @@ class SupabaseDatabase:
         self.users_table = "users"
         self.saved_jobs_table = "saved_jobs"
         self.score_cache_table = "score_cache"
+        self.tailor_cache_table = "tailor_cache"
 
     # --- Score cache ---------------------------------------------------
     def get_cached_score(self, user_uuid, job_table, job_id):
@@ -78,6 +79,49 @@ class SupabaseDatabase:
             ).execute()
         except Exception:
             self.logger.exception("Failed clearing score cache for %s", user_uuid)
+
+    # --- Tailor cache --------------------------------------------------
+    def get_cached_tailor(self, user_uuid, job_table, job_id):
+        """The cached tailored YAML for (user, job), or None."""
+        try:
+            data = (
+                self.supabase.table(self.tailor_cache_table)
+                .select("yaml")
+                .eq("user_id", user_uuid)
+                .eq("job_table", job_table)
+                .eq("job_id", int(job_id))
+                .limit(1)
+                .execute()
+                .data
+            )
+            return data[0]["yaml"] if data else None
+        except Exception:
+            self.logger.exception("Failed reading tailor cache")
+            return None
+
+    def set_cached_tailor(self, user_uuid, job_table, job_id, yaml_text):
+        """Upsert tailored YAML for (user, job). Best-effort."""
+        try:
+            self.supabase.table(self.tailor_cache_table).upsert(
+                {
+                    "user_id": user_uuid,
+                    "job_table": job_table,
+                    "job_id": int(job_id),
+                    "yaml": yaml_text,
+                },
+                on_conflict="user_id,job_table,job_id",
+            ).execute()
+        except Exception:
+            self.logger.exception("Failed writing tailor cache")
+
+    def clear_tailor_cache(self, user_uuid):
+        """Drop all cached tailors for a user — call when their resume changes."""
+        try:
+            self.supabase.table(self.tailor_cache_table).delete().eq(
+                "user_id", user_uuid
+            ).execute()
+        except Exception:
+            self.logger.exception("Failed clearing tailor cache for %s", user_uuid)
 
     def get_or_create_user(self, discord_id, username=None, display_name=None):
         """Return the users.id UUID for a Discord member, inserting the row on

@@ -167,7 +167,10 @@ def extract_text(image_png: bytes) -> str | None:
     upload; downstream AI commands reuse the text and skip vision entirely."""
     from commands import gemma_client
 
-    text = gemma_client.ask_with_image(image_png, _EXTRACT_PROMPT)
+    # Mechanical transcription — use the FAST tier (Flash-lite).
+    text = gemma_client.ask_with_image(
+        image_png, _EXTRACT_PROMPT, chain=gemma_client.FAST_CHAIN
+    )
     return (text or "").strip() or None
 
 
@@ -225,14 +228,16 @@ def parse_structured(text=None, img=None) -> dict | None:
     or None. Safe to call off-thread."""
     from commands import gemma_client
 
-    # Big output — give generous headroom (Gemma JSON mode wastes budget at
-    # tight caps and returns empty).
+    # Mechanical parse, big output — FAST tier (Flash-lite), generous headroom.
     if text:
         data = gemma_client.ask_json_text(
-            f"{_STRUCTURE_PROMPT}\n\n<resume>\n{text}\n</resume>", 6000
+            f"{_STRUCTURE_PROMPT}\n\n<resume>\n{text}\n</resume>", 6000,
+            chain=gemma_client.FAST_CHAIN,
         )
     elif img:
-        data = gemma_client.ask_json_with_image(img, _STRUCTURE_PROMPT, 6000)
+        data = gemma_client.ask_json_with_image(
+            img, _STRUCTURE_PROMPT, 6000, chain=gemma_client.FAST_CHAIN
+        )
     else:
         return None
 
