@@ -27,6 +27,7 @@ from commands import (
     commands_board,
     help_command as help_cmd,
     job_ai,
+    lang_view,
     latest as latest_cmd,
     profile as profile_cmd,
     refreshembeds as refreshembeds_cmd,
@@ -1181,33 +1182,39 @@ WELCOME_L10N = {
         "button": "🌐 中文",
         "greetings": [
             (
-                "Oh? A new player just spawned. Welcome, {mention}.\n\n"
+                "Oh? A new player just rendered in. Sup, {mention}. Silver Wolf — "
+                "the one who treats this whole universe like a sandbox game.\n\n"
                 "Tutorial's short: grind LeetCode, farm referrals, clear the interview "
-                "gauntlet. Difficulty: **Inferno**. ...Relax, you'll manage. Probably."
+                "raid. Difficulty's flagged **Inferno**, sure — but every system's got "
+                "an exploit. Stick with me and it's a free-win lobby."
             ),
             (
-                "Huh. My scanner picked up a fresh signal — {mention} just logged in.\n\n"
-                "Pro tip from someone who's cracked tougher systems: recruiter ghosting "
-                "isn't a bug, it's a feature. The internship feed here auto-updates, so "
-                "camp it like a rare spawn."
+                "Heh. Scanner pinged a fresh signal — {mention} just logged in.\n\n"
+                "Word from someone who's cracked way nastier firewalls: recruiter "
+                "ghosting isn't a bug, it's a *feature*. Annoying, patchable. The "
+                "internship feed auto-refreshes here — camp it like a rare spawn and "
+                "loot every drop."
             ),
             (
                 "New character unlocked: {mention}.\n"
                 "**Class:** Intern Hopeful. **Starting gear:** one résumé, zero replies.\n\n"
-                "Don't sweat it — this server's basically a cheat code. Fresh postings "
-                "drop every 15 minutes. You're welcome."
+                "Rough opening hand, not gonna lie. Good thing you found my server — "
+                "basically a cheat cartridge. Fresh postings respawn every 15 minutes. "
+                "Don't thank me, just carry."
             ),
             (
-                "{mention} has entered the game.\n\n"
-                "I already ran a scan on your data. Projects could use a patch, but "
-                "nothing Aether Editing can't fix. Check the postings channel and start "
-                "queueing applications — it's a numbers game. Spam the attack button."
+                "{mention} joined the instance. About time.\n\n"
+                "Already scanned your data — few glitches in the project logs, nothing "
+                "my **Aether Editing** can't rewrite. *It's a mechanic, not a bug.* Hit "
+                "the postings channel and start queuing apps: spam basic attack, let the "
+                "RNG cook."
             ),
             (
                 "Another one joins the run. Hey, {mention}.\n\n"
-                "The universe is one big simulation, and internship season is its "
-                "worst-designed side quest. Lucky for you, the walkthrough gets posted "
-                "here automatically. Offer letter = your ultimate. Go build charge."
+                "Reality's just a big immersive sim, and internship season is its "
+                "worst-coded side quest — trust me, I've read the source. Lucky you, the "
+                "walkthrough auto-posts right here. Offer letter's your ult. Land it and "
+                "it's a T0 sweep. GG."
             ),
         ],
     },
@@ -1228,30 +1235,35 @@ WELCOME_L10N = {
         "button": "🌐 English",
         "greetings": [
             (
-                "哦？新玩家刷新了。欢迎，{mention}。\n\n"
-                "新手教程很短：刷 LeetCode，攒内推，通关面试连战。"
-                "难度：**炼狱**。……放轻松，你能行的。大概吧。"
+                "哦？新玩家加载进来了。嗨，{mention}。我是银狼——"
+                "把整个宇宙当成沙盒游戏玩的那个。\n\n"
+                "新手教程很短：刷 LeetCode，攒内推，打面试副本。"
+                "难度标的是**炼狱**级，可哪个系统没漏洞呢。"
+                "跟紧我，把把顺风局。"
             ),
             (
-                "嗯？我的扫描器捕捉到新信号——{mention} 刚上线。\n\n"
-                "来自破解过更硬系统的人的忠告：HR 已读不回不是 bug，是特性。"
-                "这里的实习频道会自动更新，像蹲稀有怪一样蹲着吧。"
+                "嘿，扫描器捕捉到新信号——{mention} 刚上线。\n\n"
+                "破解过更硬防火墙的人给你句忠告：HR 已读不回不是 bug，是**特性**。"
+                "烦是烦，但能打补丁。这里的实习频道自动刷新，"
+                "像蹲稀有怪一样守着，掉落一个都别漏。"
             ),
             (
                 "新角色解锁：{mention}。\n"
                 "**职业：**实习候补。**初始装备：**一份简历，零回复。\n\n"
-                "别慌——这个服务器基本算开挂。新岗位每 15 分钟刷新一次。不用谢。"
+                "开局手牌是有点烂，不骗你。不过你摸到我这张卡带算走运——"
+                "基本等于开挂。新岗位每 15 分钟重新刷新。别谢我，carry 起来就行。"
             ),
             (
-                "{mention} 已进入游戏。\n\n"
-                "你的数据我已经扫过了。项目经历需要打个补丁，"
-                "不过没有以太编辑修不好的东西。去岗位频道排队投递吧——"
-                "这是数量游戏，狂点攻击键。"
+                "{mention} 进本了，总算来了。\n\n"
+                "你的数据我扫过一遍——项目记录里有几个【缺陷】，"
+                "没有我的**以太编辑**改不动的。*这是机制，不是 BUG。*"
+                "去岗位频道排队投递：狂点平A，让 RNG 自己算。"
             ),
             (
                 "又一个加入本局。嘿，{mention}。\n\n"
-                "宇宙就是一场大型模拟游戏，而实习季是它设计最烂的支线任务。"
-                "算你走运，攻略会自动发在这里。Offer = 你的终结技。去攒能量吧。"
+                "现实不过是场大型沉浸式模拟，实习季是它代码写得最烂的支线——"
+                "信我，源码我读过。算你走运，攻略自动发在这儿。"
+                "Offer 就是你的终结技，落地就是 T0 通关。GG。"
             ),
         ],
     },
@@ -1299,9 +1311,11 @@ async def send_welcome(member):
     channel = await get_cached_channel("welcome", WELCOME_CHANNEL_ID)
 
     greeting_idx = random.randrange(len(WELCOME_L10N["zh"]["greetings"]))
-    embed = build_welcome_embed(member, "zh", greeting_idx)
+    view = lang_view.LangToggleView(
+        lambda lang: build_welcome_embed(member, lang, greeting_idx), lang="zh"
+    )
 
-    message = await channel.send(embed=embed)
+    message = await channel.send(embed=view.embed(), view=view)
 
     for emoji in ("👾", "🎮", "💜"):
         await message.add_reaction(emoji)
@@ -1353,6 +1367,8 @@ resume_cmd.register(bot, get_db=get_db, logger=logger)
 ai_cmd.register(bot, get_db=get_db, logger=logger)
 profile_cmd.register(bot, get_db=get_db, logger=logger)
 subscribe_cmd.register(bot, get_db=get_db, logger=logger)
+from commands import test_persona as _test_persona_cmd
+_test_persona_cmd.register(bot, logger=logger)
 
 
 @bot.event
@@ -1360,6 +1376,18 @@ async def on_interaction(interaction):
     if interaction.type is not discord.InteractionType.component:
         return
     custom_id = (interaction.data or {}).get("custom_id", "")
+
+    # Command-board language toggle — its own persistent view, edits in place.
+    if custom_id.startswith("board:lang:"):
+        if interaction.id in _HANDLED_INTERACTIONS:
+            return
+        _HANDLED_INTERACTIONS.add(interaction.id)
+        try:
+            await commands_board.handle_board_lang(bot, interaction)
+        except Exception:
+            logger.exception("Command board lang toggle failed")
+        return
+
     if not custom_id.startswith("jobsec:"):
         return
 

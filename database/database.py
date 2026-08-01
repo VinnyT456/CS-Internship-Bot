@@ -37,9 +37,15 @@ class SupabaseDatabase:
         self.score_cache_table = "score_cache"
         self.tailor_cache_table = "tailor_cache"
 
+    # Bump whenever the Score prompt / output schema changes so stale rows
+    # (old voice, missing bilingual fields) are ignored and regenerated.
+    SCORE_CACHE_VERSION = 2
+
     # --- Score cache ---------------------------------------------------
     def get_cached_score(self, user_uuid, job_table, job_id):
-        """The cached Score JSON for (user, job), or None."""
+        """The cached Score JSON for (user, job), or None. Rows written under an
+        older cache version are treated as a miss so they get regenerated with
+        the current prompt (Silver Wolf voice + bilingual fields)."""
         try:
             data = (
                 self.supabase.table(self.score_cache_table)
@@ -51,14 +57,22 @@ class SupabaseDatabase:
                 .execute()
                 .data
             )
-            return data[0]["result"] if data else None
+            if not data:
+                return None
+            result = data[0]["result"]
+            if not isinstance(result, dict) or result.get("_v") != self.SCORE_CACHE_VERSION:
+                return None
+            return result
         except Exception:
             self.logger.exception("Failed reading score cache")
             return None
 
     def set_cached_score(self, user_uuid, job_table, job_id, result):
-        """Upsert a Score result for (user, job). Best-effort."""
+        """Upsert a Score result for (user, job). Best-effort. Stamps the current
+        cache version so a later prompt change can invalidate it."""
         try:
+            if isinstance(result, dict):
+                result = {**result, "_v": self.SCORE_CACHE_VERSION}
             self.supabase.table(self.score_cache_table).upsert(
                 {
                     "user_id": user_uuid,
@@ -82,7 +96,8 @@ class SupabaseDatabase:
 
     # --- Tailor cache --------------------------------------------------
     def get_cached_tailor(self, user_uuid, job_table, job_id):
-        """The cached tailored YAML for (user, job), or None."""
+        """The cached tailor blob (a JSON string) for (user, job), or None.
+        Version invalidation lives in the blob itself (see _load_blob)."""
         try:
             data = (
                 self.supabase.table(self.tailor_cache_table)
@@ -100,7 +115,7 @@ class SupabaseDatabase:
             return None
 
     def set_cached_tailor(self, user_uuid, job_table, job_id, yaml_text):
-        """Upsert tailored YAML for (user, job). Best-effort."""
+        """Upsert the tailor blob (a JSON string) for (user, job). Best-effort."""
         try:
             self.supabase.table(self.tailor_cache_table).upsert(
                 {

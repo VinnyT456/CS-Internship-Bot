@@ -211,7 +211,7 @@ _STRUCTURE_PROMPT = (
     "ends with '}'. Do NOT return a JSON array/list at the top level.\n"
     "{\n"
     '  "name": "", "contact": {"phone": "", "email": "", "linkedin": "", "github": ""},\n'
-    '  "education": [{"school": "", "location": "", "degree": "", "dates": ""}],\n'
+    '  "education": [{"school": "", "location": "", "degree": "", "dates": "", "gpa": "", "coursework": [""]}],\n'
     '  "experience": [{"company": "", "role": "", "location": "", "dates": "", "description": [""]}],\n'
     '  "projects": [{"name": "", "technologies": [""], "date": "", "link": "", "description": [""]}],\n'
     '  "skills": [{"category": "", "list": [""]}],\n'

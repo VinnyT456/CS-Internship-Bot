@@ -141,6 +141,35 @@ def health():
     return {"ok": True, "tectonic": shutil.which(TECTONIC) is not None}
 
 
+def _scrub_placeholders(data):
+    """Recursively remove any '[ADD METRIC]' placeholder from all string values,
+    cleaning the surrounding 'as measured by …' phrasing so the résumé still
+    reads naturally. A placeholder in the final PDF would flag as unfinished."""
+    import re as _re
+
+    token = "[ADD METRIC]"
+
+    def clean(s):
+        if token not in s:
+            return s
+        s = _re.sub(r"(?i)\s*,?\s*as measured by\s*\[ADD METRIC\]", "", s)
+        return s.replace(token, "").replace("  ", " ").strip()
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            return {k: walk(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [walk(v) for v in obj]
+        if isinstance(obj, str):
+            return clean(obj)
+        return obj
+
+    cleaned = walk(data)
+    if isinstance(cleaned, dict):
+        data.clear()
+        data.update(cleaned)
+
+
 @app.post("/build")
 async def build(
     request: Request,
@@ -160,6 +189,10 @@ async def build(
         raise HTTPException(status_code=422, detail=f"Invalid YAML: {exc}")
     if not isinstance(data, dict):
         raise HTTPException(status_code=422, detail="YAML must be a mapping")
+
+    # Safety: a "[ADD METRIC]" placeholder must NEVER reach a recruiter/ATS.
+    # Scrub any that slipped through, collapsing the "as measured by …" clause.
+    _scrub_placeholders(data)
 
     # Schema validation (logs warnings for unknown fields; raises on hard errors).
     try:
