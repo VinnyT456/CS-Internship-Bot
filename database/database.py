@@ -39,7 +39,7 @@ class SupabaseDatabase:
 
     # Bump whenever the Score prompt / output schema changes so stale rows
     # (old voice, missing bilingual fields) are ignored and regenerated.
-    SCORE_CACHE_VERSION = 2
+    SCORE_CACHE_VERSION = 49
 
     # --- Score cache ---------------------------------------------------
     def get_cached_score(self, user_uuid, job_table, job_id):

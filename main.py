@@ -1182,18 +1182,18 @@ WELCOME_L10N = {
         "button": "🌐 中文",
         "greetings": [
             (
-                "Oh? A new player just rendered in. Sup, {mention}. Silver Wolf — "
-                "the one who treats this whole universe like a sandbox game.\n\n"
-                "Tutorial's short: grind LeetCode, farm referrals, clear the interview "
-                "raid. Difficulty's flagged **Inferno**, sure — but every system's got "
-                "an exploit. Stick with me and it's a free-win lobby."
+                "Oh? New player just showed up. Sup, {mention} — I'm Silver Wolf.\n\n"
+                "Here's the short version: this place posts internships the second "
+                "they drop, and I'll help you read them, score your résumé, and tune it. "
+                "The interview's the boss fight. It's tougher than it looks — but every "
+                "system's got an exploit, and I'm good at finding them. Stick around."
             ),
             (
-                "Heh. Scanner pinged a fresh signal — {mention} just logged in.\n\n"
-                "Word from someone who's cracked way nastier firewalls: recruiter "
-                "ghosting isn't a bug, it's a *feature*. Annoying, patchable. The "
-                "internship feed auto-refreshes here — camp it like a rare spawn and "
-                "loot every drop."
+                "Heh. {mention} just logged in.\n\n"
+                "One thing worth knowing early: recruiter ghosting isn't a bug, it's a "
+                "*feature*. Annoying, but you work around it. The internship feed here "
+                "refreshes on its own — just keep an eye on it and don't miss the good "
+                "ones."
             ),
             (
                 "New character unlocked: {mention}.\n"
@@ -1203,18 +1203,18 @@ WELCOME_L10N = {
                 "Don't thank me, just carry."
             ),
             (
-                "{mention} joined the instance. About time.\n\n"
-                "Already scanned your data — few glitches in the project logs, nothing "
-                "my **Aether Editing** can't rewrite. *It's a mechanic, not a bug.* Hit "
-                "the postings channel and start queuing apps: spam basic attack, let the "
-                "RNG cook."
+                "{mention} joined. About time.\n\n"
+                "I already took a look at the kind of stuff you've got — a few rough "
+                "spots, nothing my **Aether Editing** can't clean up. Head to the "
+                "postings channel and start applying; volume matters more than you'd "
+                "think early on."
             ),
             (
                 "Another one joins the run. Hey, {mention}.\n\n"
-                "Reality's just a big immersive sim, and internship season is its "
-                "worst-coded side quest — trust me, I've read the source. Lucky you, the "
-                "walkthrough auto-posts right here. Offer letter's your ult. Land it and "
-                "it's a T0 sweep. GG."
+                "Internship season is a badly-coded grind — long queues, silent "
+                "rejections, RNG that feels rigged. Good news: the walkthrough posts "
+                "right here, and I've cleared this level plenty. Land the offer and it's "
+                "a clean sweep. Let's go."
             ),
         ],
     },
@@ -1235,17 +1235,15 @@ WELCOME_L10N = {
         "button": "🌐 English",
         "greetings": [
             (
-                "哦？新玩家加载进来了。嗨，{mention}。我是银狼——"
-                "把整个宇宙当成沙盒游戏玩的那个。\n\n"
-                "新手教程很短：刷 LeetCode，攒内推，打面试副本。"
-                "难度标的是**炼狱**级，可哪个系统没漏洞呢。"
-                "跟紧我，把把顺风局。"
+                "哦？新玩家进来了。嗨，{mention}——我银狼。\n\n"
+                "长话短说：这地方岗位一放出来就自动推送，我帮你读岗、给简历打分、"
+                "帮你调。面试是 Boss 战，比看着难——不过哪个系统没漏洞呢，"
+                "找漏洞我最在行。跟紧点。"
             ),
             (
-                "嘿，扫描器捕捉到新信号——{mention} 刚上线。\n\n"
-                "破解过更硬防火墙的人给你句忠告：HR 已读不回不是 bug，是**特性**。"
-                "烦是烦，但能打补丁。这里的实习频道自动刷新，"
-                "像蹲稀有怪一样守着，掉落一个都别漏。"
+                "嘿，{mention} 刚上线。\n\n"
+                "早点告诉你一句：HR 已读不回不是 bug，是**特性**。烦是烦，但绕得过去。"
+                "这儿的实习频道会自己刷新——盯着点，别错过好岗位就行。"
             ),
             (
                 "新角色解锁：{mention}。\n"
@@ -1254,16 +1252,15 @@ WELCOME_L10N = {
                 "基本等于开挂。新岗位每 15 分钟重新刷新。别谢我，carry 起来就行。"
             ),
             (
-                "{mention} 进本了，总算来了。\n\n"
-                "你的数据我扫过一遍——项目记录里有几个【缺陷】，"
-                "没有我的**以太编辑**改不动的。*这是机制，不是 BUG。*"
-                "去岗位频道排队投递：狂点平A，让 RNG 自己算。"
+                "{mention} 进来了，总算来了。\n\n"
+                "你手上这些东西我大概扫了一遍——有几处糙的，没有我的**以太编辑**"
+                "收拾不了的。去岗位频道开始投吧，早期量比什么都重要。"
             ),
             (
                 "又一个加入本局。嘿，{mention}。\n\n"
-                "现实不过是场大型沉浸式模拟，实习季是它代码写得最烂的支线——"
-                "信我，源码我读过。算你走运，攻略自动发在这儿。"
-                "Offer 就是你的终结技，落地就是 T0 通关。GG。"
+                "实习季就是个写得稀烂的苦力关——排队排到天荒地老，投了没回音，"
+                "运气还像被人做了手脚。好消息是攻略就发在这儿，这关我通了不知多少遍了。"
+                "拿到 offer 就是干净通关。走着。"
             ),
         ],
     },
@@ -1276,7 +1273,7 @@ def build_welcome_embed(member, lang, greeting_idx):
     embed = discord.Embed(
         title=loc["title"],
         description=loc["greetings"][greeting_idx].format(mention=member.mention),
-        color=discord.Color.purple(),
+        color=discord.Color.from_rgb(167, 139, 250),  # Silver Wolf's violet
         timestamp=discord.utils.utcnow(),
     )
 
@@ -1310,7 +1307,12 @@ def build_welcome_embed(member, lang, greeting_idx):
 async def send_welcome(member):
     channel = await get_cached_channel("welcome", WELCOME_CHANNEL_ID)
 
-    greeting_idx = random.randrange(len(WELCOME_L10N["zh"]["greetings"]))
+    # Same index must be valid in BOTH languages (the toggle re-renders with it),
+    # so bound it by the shorter greeting list.
+    n_greetings = min(
+        len(WELCOME_L10N["zh"]["greetings"]), len(WELCOME_L10N["en"]["greetings"])
+    )
+    greeting_idx = random.randrange(n_greetings)
     view = lang_view.LangToggleView(
         lambda lang: build_welcome_embed(member, lang, greeting_idx), lang="zh"
     )

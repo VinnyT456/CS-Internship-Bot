@@ -16,6 +16,10 @@ log = logging.getLogger("cs_internship_bot")
 # Marker in the footer so we can find (and edit) our own board on restart.
 BOARD_MARKER = "cmdboard:v1"
 
+# Silver Wolf's signature violet (her hair / Aether Editing glow) — used for the
+# guide's sidebar so the board reads as *hers*, not generic blurple.
+SW_PURPLE = discord.Color.from_rgb(167, 139, 250)
+
 # Grouped so the embed reads top-to-bottom by what a user wants to do.
 COMMAND_GROUPS = [
     (
@@ -116,7 +120,7 @@ POSTING_BUTTONS_ZH = (
 
 _BOARD_TEXT = {
     "en": {
-        "title": "🧭 Silver Wolf's Command Guide",
+        "title": "🐺 Silver Wolf's Command Guide ✦",
         "intro": (
             "Alright, listen up — here's every tool in the kit. Slash commands "
             "work anywhere in the server; just start typing `/` and the menu "
@@ -128,7 +132,7 @@ _BOARD_TEXT = {
         "footer": f"Aether Editing complete • {BOARD_MARKER}",
     },
     "zh": {
-        "title": "🧭 银狼的命令指南",
+        "title": "🐺 银狼的命令指南 ✦",
         "intro": (
             "行，听好了——工具包里的东西都在这。斜杠命令在服务器任何地方都能用，"
             "打个 `/` 菜单就弹出来。宇宙是场游戏，控制台我刚递你手上了。\n​"
@@ -146,7 +150,7 @@ def build_board_embed(bot, lang="en"):
     embed = discord.Embed(
         title=t["title"],
         description=t["intro"],
-        color=discord.Color.blurple(),
+        color=SW_PURPLE,
         timestamp=discord.utils.utcnow(),
     )
     for name, rows in t["groups"]:

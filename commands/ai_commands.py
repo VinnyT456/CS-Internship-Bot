@@ -10,12 +10,20 @@ import logging
 
 import discord
 
-from commands import gemma_client, resume_utils
+from commands import gemma_client, lang_view, persona, resume_utils
 
 log = logging.getLogger("cs_internship_bot")
 
 FIELD_LIMIT = 1024
 MAX_FIELDS = 6  # keep embeds readable; overflow is truncated with a note
+
+# Reply in whatever language the user wrote in — Silver Wolf speaks both. Appended
+# to the free-text AI prompts so a Chinese question gets a natural 中文 answer.
+_LANG_MIRROR = (
+    "\n\nLANGUAGE: reply in the SAME language the user wrote in. If their input is "
+    "in Chinese, answer in Silver Wolf's natural Simplified-Chinese voice (痞帅、"
+    "慵懒、游戏黑客俚语，自然不堆梗); otherwise answer in English. Never mix the two."
+)
 
 
 def _chunk(text, size=FIELD_LIMIT):
@@ -46,7 +54,7 @@ def _answer_embed(title, body, color=discord.Color.blurple()):
         )
     if len(chunks) > MAX_FIELDS:
         embed.add_field(name="​", value="*…truncated*", inline=False)
-    embed.set_footer(text="AI-generated • verify before relying on it")
+    embed.set_footer(text="🐺 Silver Wolf • don't trust the RNG blind, double-check")
     return embed
 
 
@@ -69,17 +77,33 @@ def _job_context(row):
 # --- Resume review (precomputed at upload; JSON so it renders as fields) ----
 
 _REVIEW_PROMPT = (
-    "You are a hiring manager with 20 years of experience in tech who also "
-    "tunes the ATS that screen resumes. Review this candidate's resume. Base "
-    "everything on what the resume actually shows; invent nothing.\n\n"
+    persona.SILVER_WOLF_SYSTEM
+    + "\n\n<this_task>\n"
+    "You're scanning a CS student's résumé (their character build) and reporting "
+    "back — like a hiring manager with 20 years reading résumés who also tunes the "
+    "ATS that screen them, except you're Silver Wolf doing it. Base EVERYTHING on "
+    "what the résumé actually shows; invent nothing. Write the text fields in your "
+    "voice — sharp, a little smug, genuinely on their side — but the advice must be "
+    "concrete and real, and the flavor stays light (a beat or two, natural, not a "
+    "caricature). Every field is honest, useful, and specific.\n</this_task>\n\n"
+    "Write every field TWICE — English + native Simplified Chinese (银狼中文语气："
+    "痞帅慵懒，游戏词汇用中文，别硬堆梗；只有真正的技术名词保留英文如 Python/AWS/ATS). "
+    "The _zh is Silver Wolf actually speaking Chinese, same energy, not a literal "
+    "translation. The _en and _zh arrays must have the SAME number of items in the "
+    "same order.\n"
     "Return ONLY this JSON, flat string arrays only:\n"
     "{\n"
-    '  "impression": "<2-sentence overall impression>",\n'
-    '  "strengths": ["<top strength>"],\n'
-    '  "improvements": ["<concrete fix: wording, formatting, missing content, quantified impact>"],\n'
-    '  "ats_gaps": ["<ATS/keyword gap for software-tech roles>"]\n'
+    '  "impression_en": "<2-sentence overall read, Silver Wolf voice>",\n'
+    '  "impression_zh": "<中文，2句，银狼语气>",\n'
+    '  "strengths_en": ["<top strength, specific>"],\n'
+    '  "strengths_zh": ["<中文>"],\n'
+    '  "improvements_en": ["<concrete fix: wording, formatting, missing content, quantified impact>"],\n'
+    '  "improvements_zh": ["<中文>"],\n'
+    '  "ats_gaps_en": ["<ATS/keyword gap for software-tech roles>"],\n'
+    '  "ats_gaps_zh": ["<中文>"]\n'
     "}\n"
-    "Caps: strengths<=3, improvements<=5, ats_gaps<=4. Keep items short."
+    "Caps: strengths<=3, improvements<=5, ats_gaps<=4 (each language). Keep items "
+    "short. Never invent skills, tools, or numbers the résumé doesn't show."
 )
 
 
@@ -94,24 +118,46 @@ def compute_review(text, img):
     return None
 
 
-def _review_embed(data):
-    embed = discord.Embed(title="📝 Resume Review", color=discord.Color.green())
-    imp = str(data.get("impression") or "").strip()
+_SW_PURPLE = discord.Color.from_rgb(167, 139, 250)  # Silver Wolf violet
+
+_REVIEW_LABELS = {
+    "en": {
+        "title": "📝 Résumé Review", "strengths": "✅ Strengths",
+        "improvements": "🔧 Improvements", "ats_gaps": "🤖 ATS / keyword gaps",
+        "footer": "🐺 Silver Wolf • don't trust the RNG blind, double-check",
+    },
+    "zh": {
+        "title": "📝 简历点评", "strengths": "✅ 强项",
+        "improvements": "🔧 待改进", "ats_gaps": "🤖 ATS / 关键词短板",
+        "footer": "🐺 银狼 • 别全信 RNG，自己再核对一遍",
+    },
+}
+
+
+def _pick_review(data, base, lang):
+    """A review field with EN/中文 fallback (base_<lang> → base_en → base)."""
+    for key in (f"{base}_{lang}", f"{base}_en", base):
+        v = data.get(key)
+        if v:
+            return v
+    return None
+
+
+def _review_embed(data, lang="en"):
+    lab = _REVIEW_LABELS.get(lang, _REVIEW_LABELS["en"])
+    embed = discord.Embed(title=lab["title"], color=_SW_PURPLE)
+    imp = str(_pick_review(data, "impression", lang) or "").strip()
     if imp:
         embed.description = imp[:4096]
-    for name, key in (
-        ("✅ Strengths", "strengths"),
-        ("🔧 Improvements", "improvements"),
-        ("🤖 ATS / keyword gaps", "ats_gaps"),
-    ):
-        items = data.get(key)
+    for base in ("strengths", "improvements", "ats_gaps"):
+        items = _pick_review(data, base, lang)
         if isinstance(items, list) and items:
             block = "\n".join(
                 f"• {str(x).strip()}" for x in items[:5] if str(x).strip()
             )
             if block:
-                embed.add_field(name=name, value=block[:1024], inline=False)
-    embed.set_footer(text="AI-generated • verify before relying on it")
+                embed.add_field(name=lab[base], value=block[:1024], inline=False)
+    embed.set_footer(text=lab["footer"])
     return embed
 
 
@@ -173,7 +219,8 @@ def register(bot, *, get_db, logger=None):
                 ephemeral=True,
             )
             return
-        await interaction.followup.send(embed=_review_embed(data), ephemeral=True)
+        view = lang_view.LangToggleView(lambda lang: _review_embed(data, lang), lang="en")
+        await interaction.followup.send(embed=_review_embed(data, "en"), view=view, ephemeral=True)
 
     # ---- /match ----------------------------------------------------------
     @bot.tree.command(
@@ -196,6 +243,8 @@ def register(bot, *, get_db, logger=None):
         type: discord.app_commands.Choice[str] = None,
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
+        # Fast-fail with a friendly message if there's no résumé; run_score below
+        # re-checks and does the actual scoring (this just saves a round-trip).
         _uid, img = await _resume_image(interaction)
         if not img:
             await _need_resume_msg(interaction)
@@ -225,28 +274,28 @@ def register(bot, *, get_db, logger=None):
             )
             return
 
+        # Reuse the tuned Score feature as the single source of truth: the same
+        # calibrated subscore-first weighted-average rubric, Silver Wolf voice,
+        # score wheel, Level-Up Plan, and EN/中文 toggle the Score button gives.
+        # Imported lazily — job_ai imports from this module, so a top-level import
+        # would be circular.
+        from commands import job_ai
+
         job = rows[0]
-        prompt = (
-            "You are an ATS and technical recruiter. The image is a candidate's "
-            "resume. Compare it against this job posting and respond with:\n"
-            "1. MATCH SCORE: a single 0-100 number with a one-line justification.\n"
-            "2. STRONG MATCHES: skills/experience that align (bullets).\n"
-            "3. GAPS: top requirements the resume is missing or weak on (bullets).\n"
-            "4. QUICK WINS: 2-3 resume tweaks to improve the match, truthfully.\n\n"
-            f"JOB POSTING:\n{_job_context(job)}"
+        embed, file, view, error = await job_ai.run_score(
+            db, interaction.user, table, job["id"]
         )
-        answer = await asyncio.to_thread(gemma_client.ask_with_image, img, prompt)
-        if not answer:
-            await interaction.followup.send(
-                "The AI couldn't score the match right now — try again later.",
-                ephemeral=True,
-            )
+        if error:
+            await interaction.followup.send(error, ephemeral=True)
             return
-        title = f"🎯 Match — {job.get('job_title')} @ {job.get('company_name')}"
-        await interaction.followup.send(
-            embed=_answer_embed(title[:256], answer, discord.Color.gold()),
-            ephemeral=True,
-        )
+        kwargs = {"ephemeral": True}
+        if embed is not None:
+            kwargs["embed"] = embed
+        if file is not None:
+            kwargs["file"] = file
+        if view is not None:
+            kwargs["view"] = view
+        await interaction.followup.send(**kwargs)
 
     # ---- /recommend ------------------------------------------------------
     @bot.tree.command(
@@ -289,10 +338,19 @@ def register(bot, *, get_db, logger=None):
             for i, j in enumerate(jobs)
         )
         prompt = (
-            "The image is a candidate's resume. From the numbered list of open "
-            "internships below, pick the 5 best fits. For each, give the number, "
-            "the role, and one line on WHY it fits their background. Rank best "
-            "first.\n\nOPEN INTERNSHIPS:\n" + menu
+            persona.SILVER_WOLF_SYSTEM
+            + "\n\n<this_task>\n"
+            "The image is a CS student's résumé — their build. You scanned it, and "
+            "now you're pointing them at the runs actually worth queuing. From the "
+            "numbered list of open internships below, pick the 5 BEST fits for THIS "
+            "candidate. For each: the number, the role, and one line on WHY it fits "
+            "their real background (tie it to something actually on the résumé — a "
+            "skill, project, or focus they have; don't invent). Rank best first. "
+            "Your Silver Wolf voice colors the wording lightly (a beat or two, "
+            "natural); the picks + reasons stay honest and genuinely useful.\n"
+            "</this_task>"
+            + _LANG_MIRROR
+            + "\n\nOPEN INTERNSHIPS:\n" + menu
         )
         answer = await asyncio.to_thread(gemma_client.ask_with_image, img, prompt)
         if not answer:
@@ -319,10 +377,21 @@ def register(bot, *, get_db, logger=None):
     async def interview(interaction: discord.Interaction, role: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
         prompt = (
-            f"Act as an interviewer for: {role}. Generate a realistic practice "
-            "set:\n- 3 behavioral questions.\n- 4 technical questions appropriate "
-            "to the role.\n- 1 'why this company/role' question.\nFor each, add a "
-            "one-line hint on what a strong answer covers. Keep it tight."
+            persona.SILVER_WOLF_SYSTEM
+            + "\n\n<this_task>\n"
+            f"You're running interview drills for a CS student prepping for: {role}. "
+            "The interview is the boss fight; you're the friend who's cleared it and "
+            "is training them."
+            + _LANG_MIRROR
+            + "\n\nGenerate a REALISTIC, role-appropriate practice set:\n"
+            "- 3 behavioral questions\n- 4 technical questions fitting THIS role\n"
+            "- 1 'why this company/role' question\n"
+            "For each, add a one-line hint on what a strong answer covers. The "
+            "questions and hints stay genuine and substantive — a real interviewer's "
+            "questions, not a joke set; your Silver Wolf voice lives in the short "
+            "framing/intro line only, and stays light (a beat or two, natural, not a "
+            "caricature). Keep the whole thing tight and actually useful. Invent "
+            "nothing about the company you don't plausibly know.\n</this_task>"
         )
         answer = await asyncio.to_thread(gemma_client.ask_text, prompt)
         if not answer:
@@ -347,9 +416,20 @@ def register(bot, *, get_db, logger=None):
     async def helpme(interaction: discord.Interaction, question: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
         prompt = (
-            "You are a helpful, practical CS-career assistant for students hunting "
-            "internships and new-grad roles. Answer concisely and specifically.\n\n"
-            f"QUESTION: {question}"
+            persona.SILVER_WOLF_SYSTEM
+            + "\n\n<this_task>\n"
+            "A CS student is asking you for career help — internships, résumés, "
+            "new-grad roles, the whole grind. Answer as Silver Wolf: the genius "
+            "hacker-friend who's already mapped this system and is handing them the "
+            "shortcut. Real, specific, practical advice FIRST — concrete steps, not "
+            "platitudes; the personality colors HOW you say it, never replaces the "
+            "substance. Stay truthful — no made-up facts or fake guarantees. Natural "
+            "voice, not a caricature: a beat or two of flavor, the rest clear and "
+            "human. LENGTH: keep the whole answer under ~1500 characters — a tight, "
+            "scannable reply (short paragraphs or a few bullets), not a wall of "
+            "text; lead with the most useful thing.\n</this_task>"
+            + _LANG_MIRROR
+            + f"\n\n<question>\n{question}\n</question>"
         )
         answer = await asyncio.to_thread(gemma_client.ask_text, prompt)
         if not answer:
