@@ -70,6 +70,45 @@ def _build_pdf_sync(yaml_text):
     return None
 
 
+def _pdf_to_png(pdf_bytes, max_pages=1, zoom=2.0):
+    """Render the first page(s) of a PDF to a single PNG (stacked vertically)
+    for an in-embed preview. Returns PNG bytes or None. Blocking — call via
+    asyncio.to_thread. Never raises. Needs PyMuPDF (fitz); if it's missing the
+    caller just falls back to the text preview + PDF download."""
+    if not pdf_bytes:
+        return None
+    try:
+        import fitz  # PyMuPDF
+
+        mat = fitz.Matrix(zoom, zoom)
+        pix_bytes = []
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for page in list(doc)[:max_pages]:
+                pix_bytes.append(page.get_pixmap(matrix=mat, alpha=False).tobytes("png"))
+        if not pix_bytes:
+            return None
+        if len(pix_bytes) == 1:
+            return pix_bytes[0]
+        # Multiple pages → stack into one tall image so a single embed shows all.
+        from PIL import Image
+
+        imgs = [Image.open(io.BytesIO(b)).convert("RGB") for b in pix_bytes]
+        width = max(im.width for im in imgs)
+        gap = 12
+        total_h = sum(im.height for im in imgs) + gap * (len(imgs) - 1)
+        canvas = Image.new("RGB", (width, total_h), (255, 255, 255))
+        y = 0
+        for im in imgs:
+            canvas.paste(im, ((width - im.width) // 2, y))
+            y += im.height + gap
+        out = io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        log.exception("PDF→PNG render failed")
+        return None
+
+
 def _parse_score(answer):
     """Pull the 0-100 match score out of the model's reply. Looks for an
     explicit `SCORE: <n>` first, then falls back to the first standalone
@@ -1291,6 +1330,77 @@ def _generate_overview(posting_ctx, tailored_bullets):
     return data if isinstance(data, dict) else None
 
 
+# --- Tailor review (folded into the same preview embed as the overview) -------
+# After tailoring, Silver Wolf also gives the fuller "review" read — the same
+# shape /reviewresume returns (impression + strengths + improvements + ATS/keyword
+# gaps) but scoped to the TAILORED build against THIS posting. Rendered in the one
+# tailor preview embed underneath the overview. One FAST call, failure-tolerant.
+_TAILOR_REVIEW_PROMPT = (
+    persona.SILVER_WOLF_SYSTEM
+    + """
+
+<this_task>
+You just Aether-Edited this candidate's résumé to target the posting below. Now \
+give them your fuller READ on the tailored build — Silver Wolf talking straight TO \
+them. Four parts: a one-line IMPRESSION (overall gut read for this role), the real \
+STRENGTHS this build brings to THIS posting, concrete IMPROVEMENTS still worth \
+making, and ATS / keyword GAPS (posting terms not yet surfaced in the build). \
+Direct address (you/your build), 刀子嘴豆腐心 (blunt but warm, never contempt), at \
+most 1-2 light gaming refs TOTAL across the whole thing — natural first, substance \
+dominates. Truthful only: judge on the tailored bullets you're given, invent \
+nothing, never claim a keyword is present if it isn't. Note: you see only the FINAL \
+tailored bullets, so for gaps reason from what's visibly missing vs. the posting — \
+don't fabricate specifics you can't see.
+</this_task>
+
+<posting>
+{posting}
+</posting>
+
+<tailored_bullets>
+{bullets}
+</tailored_bullets>
+
+<bilingual>
+Write every field TWICE — natural English + native Simplified Chinese (银狼中文语气, \
+游戏词汇用中文：配装/要点/门禁; only real tech nouns stay English). Same energy, not a \
+literal translation. Each list item is one tight line.
+</bilingual>
+
+<output_format>
+Return ONLY this JSON, no prose:
+{{
+  "impression_en": "<one punchy line: overall read of this build for this role>",
+  "impression_zh": "<中文>",
+  "strengths_en": ["<real strength for this posting>", "<...>"],
+  "strengths_zh": ["<中文>", "<...>"],
+  "improvements_en": ["<concrete improvement still worth making>", "<...>"],
+  "improvements_zh": ["<中文>", "<...>"],
+  "ats_gaps_en": ["<posting keyword/term not yet surfaced in the build>", "<...>"],
+  "ats_gaps_zh": ["<中文>", "<...>"]
+}}
+Keep each list to 2-4 items. If a list is genuinely empty (e.g. no ATS gaps), \
+return [].
+</output_format>"""
+)
+
+
+def _generate_review(posting_ctx, tailored_bullets):
+    """Silver Wolf's fuller review of the TAILORED build (impression / strengths /
+    improvements / ats_gaps), bilingual, for the same preview embed. One FAST call.
+    Returns a dict or None — never raises; the tailor works fine without it."""
+    if not tailored_bullets:
+        return None
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(tailored_bullets))
+    prompt = _TAILOR_REVIEW_PROMPT.format(posting=posting_ctx, bullets=numbered)
+    try:
+        data = gemma_client.ask_json_text(prompt, 1800, chain=gemma_client.FAST_CHAIN)
+    except Exception:
+        log.exception("Tailor review generation failed; skipping review")
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _review_and_refine(posting_ctx, metric_bullets):
     """Run the tailored bullets past the multi-actor review panel and return the
     refined list (same length/order). One FAST-tier call role-plays all four
@@ -1612,10 +1722,12 @@ async def _tailor_build(structured, row, progress=None):
         await progress(len(chunks) + 1, total)
 
     # One cheap batched pass for the clean no-metric variants, plus Silver Wolf's
-    # overview — run concurrently so the overview adds no extra wall-clock.
-    nometrics, overview = await asyncio.gather(
+    # overview AND her fuller review — all run concurrently so they add no extra
+    # wall-clock. Overview + review render together in the one preview embed.
+    nometrics, overview, review = await asyncio.gather(
         asyncio.to_thread(_polish_nometrics, posting_ctx, metric_bullets),
         asyncio.to_thread(_generate_overview, posting_ctx, metric_bullets),
+        asyncio.to_thread(_generate_review, posting_ctx, metric_bullets),
     )
     if progress:
         await progress(total, total)
@@ -1628,7 +1740,12 @@ async def _tailor_build(structured, row, progress=None):
         }
         for i, (loc, m) in enumerate(zip(locators, metric_bullets))
     ]
-    return {"structured": structured, "bullets": bullets, "overview": overview}
+    return {
+        "structured": structured,
+        "bullets": bullets,
+        "overview": overview,
+        "review": review,
+    }
 
 
 _METRIC_TOKEN = "[ADD METRIC]"
@@ -1835,6 +1952,9 @@ _TAILOR_TEXT = {
         "ov_name": "🐺 Silver Wolf's Read",
         "ov_strong": "💪 **Strong:**", "ov_changed": "🔧 **I tuned:**",
         "ov_todo": "🎯 **Still needs you:**",
+        "rv_impression": "🔍 My read",
+        "rv_strengths": "✅ Strengths", "rv_improvements": "🔧 Still worth fixing",
+        "rv_ats_gaps": "🤖 ATS / keyword gaps",
         "name": "👤 Name", "education": "🎓 Education", "experience": "💼 Experience",
         "projects": "🛠️ Projects", "skills": "🧩 Skills",
         "footer": "🐺 Aether-Edited by Silver Wolf • it's your build, give it one last read before you ship",
@@ -1872,6 +1992,9 @@ _TAILOR_TEXT = {
         "ov_name": "🐺 银狼的点评",
         "ov_strong": "💪 **强项：**", "ov_changed": "🔧 **我改了：**",
         "ov_todo": "🎯 **还需要你：**",
+        "rv_impression": "🔍 我的判断",
+        "rv_strengths": "✅ 强项", "rv_improvements": "🔧 还能再改",
+        "rv_ats_gaps": "🤖 ATS / 关键词短板",
         "name": "👤 姓名", "education": "🎓 教育", "experience": "💼 经历",
         "projects": "🛠️ 项目", "skills": "🧩 技能",
         "footer": "🐺 银狼以太编辑完成 • 这是你的配装，提交前自己再过一遍",
@@ -1953,6 +2076,35 @@ class TailorView(discord.ui.View):
                 name=t["ov_name"], value="\n".join(parts)[:1024], inline=False
             )
 
+    def _add_review_fields(self, embed, t):
+        """Fold Silver Wolf's fuller review (impression / strengths / improvements
+        / ATS gaps) into this same preview embed, in the current language. This is
+        the /reviewresume content merged in — one embed, not two. No-op if the
+        model didn't produce a review (the tailor works fine without it)."""
+        rv = self.blob.get("review")
+        if not isinstance(rv, dict):
+            return
+        lang = self.lang
+
+        def _pick(base):
+            return rv.get(f"{base}_{lang}") or rv.get(f"{base}_en") or rv.get(base)
+
+        imp = str(_pick("impression") or "").strip()
+        if imp:
+            embed.add_field(name=t["rv_impression"], value=imp[:1024], inline=False)
+        for base, label in (
+            ("strengths", t["rv_strengths"]),
+            ("improvements", t["rv_improvements"]),
+            ("ats_gaps", t["rv_ats_gaps"]),
+        ):
+            items = _pick(base)
+            if isinstance(items, list) and items:
+                block = "\n".join(
+                    f"• {str(x).strip()}" for x in items[:4] if str(x).strip()
+                )
+                if block:
+                    embed.add_field(name=label, value=block[:1024], inline=False)
+
     def preview_embed(self):
         """A readable, in-Discord preview of the tailored resume (no PDF yet).
         Shows the assembled sections so the user can read it before building."""
@@ -2029,6 +2181,10 @@ class TailorView(discord.ui.View):
                 name=t["skills"], value=(txt[:1020] + "…") if len(txt) > 1024 else txt,
                 inline=False,
             )
+
+        # Silver Wolf's fuller review (the /reviewresume content) folded into this
+        # same embed, below the build — impression / strengths / improvements / ATS.
+        self._add_review_fields(embed, t)
 
         embed.set_footer(text=t["footer"])
         return embed
@@ -2175,20 +2331,31 @@ class TailorView(discord.ui.View):
         yaml_text = self.current_yaml()
         pdf = await asyncio.to_thread(_build_pdf_sync, yaml_text)
         embed = self.status_embed()
+        files = []
         if pdf:
             self.last_pdf = pdf
-            file = discord.File(io_bytes(pdf), filename=f"resume_{self.safe_company}.pdf")
+            files.append(
+                discord.File(io_bytes(pdf), filename=f"resume_{self.safe_company}.pdf")
+            )
+            # Render page 1 to a PNG so the résumé is viewable right in the embed
+            # (not just a text list). Falls through gracefully if fitz is missing.
+            png = await asyncio.to_thread(_pdf_to_png, pdf)
+            if png:
+                files.append(discord.File(io_bytes(png), filename="resume_preview.png"))
+                embed.set_image(url="attachment://resume_preview.png")
         else:
-            file = discord.File(
-                io_bytes(yaml_text.encode("utf-8")),
-                filename=f"tailored_resume_{self.safe_company}.yaml",
+            files.append(
+                discord.File(
+                    io_bytes(yaml_text.encode("utf-8")),
+                    filename=f"tailored_resume_{self.safe_company}.yaml",
+                )
             )
             t = _TAILOR_TEXT.get(self.lang, _TAILOR_TEXT["en"])
             embed.add_field(
                 name=t["builder_off_name"], value=t["builder_off"], inline=False,
             )
         await interaction.followup.send(
-            embed=embed, file=file, view=self, ephemeral=True
+            embed=embed, files=files, view=self, ephemeral=True
         )
 
 
@@ -2222,7 +2389,7 @@ async def run_tailor(db, user, table, row_id, progress=None):
 
 # Bump when the Tailor prompt / blob schema changes so stale caches (old voice,
 # old bullet variants) are ignored and regenerated with the current prompt.
-_TAILOR_BLOB_VERSION = 23
+_TAILOR_BLOB_VERSION = 24
 
 
 def _dump_blob(blob):

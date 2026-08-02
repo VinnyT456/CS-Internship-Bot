@@ -184,6 +184,8 @@ _FAKE_BLOB = {
         "todo_en": "Fill the [ADD METRIC] slots with real numbers — proof hits way harder than plain claims. That's the only thing left.",
         "todo_zh": "把 [ADD METRIC] 的位置填上真实数字——有证据比空说狠多了。就差这一步。",
     },
+    # Silver Wolf's fuller review, folded into the same tailor preview embed.
+    "review": _FAKE_REVIEW,
 }
 
 
@@ -293,20 +295,14 @@ def register(bot, *, logger=None):
 
     @bot.tree.command(
         name="testtailor",
-        description="[test] Preview Tailor + Review together (bilingual, fake data)",
+        description="[test] Preview the Tailor embed — build + Silver Wolf's review in one (bilingual)",
     )
     @admin
     async def testtailor(interaction: discord.Interaction):
-        # Two halves of the same flow: the tailored build, then Silver Wolf's read on it.
+        # One embed: the tailored build AND Silver Wolf's full review folded in.
         tailor = job_ai.TailorView(_FAKE_BLOB, "Palantir Technologies")
         await interaction.response.send_message(
             embed=tailor.preview_embed(), view=tailor, ephemeral=True
-        )
-        review = lang_view.LangToggleView(
-            lambda lang: ai_commands._review_embed(_FAKE_REVIEW, lang), lang="en"
-        )
-        await interaction.followup.send(
-            embed=ai_commands._review_embed(_FAKE_REVIEW, "en"), view=review, ephemeral=True
         )
 
     @bot.tree.command(name="testguide", description="[test] Preview the bilingual command guide")
