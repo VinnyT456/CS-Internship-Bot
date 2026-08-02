@@ -1207,9 +1207,22 @@ Write each field TWICE — natural English + native Simplified Chinese (银狼�
 a literal translation.
 </bilingual>
 
+<intro_line>
+Also write ONE short opener line — Silver Wolf handing the finished tailor back, \
+in her voice. It sits at the very top of the preview, above everything. Vary it \
+every time (never a fixed template): a little 傲娇 "…fine, I ran Aether Editing on \
+your résumé and pushed it past my review panel — ATS, recruiter, hiring manager, \
+tech lead — so nothing slips through" energy, then "read it below." Keep it to \
+1-2 sentences, ONE flavor beat max, natural over loud. Do NOT mention specific \
+metric counts or fill instructions — the bot appends those factual lines itself. \
+Truthful: you did tailor it and run the review panel; don't claim anything else.
+</intro_line>
+
 <output_format>
 Return ONLY this JSON, no prose:
 {{
+  "intro_en": "<1-2 sentence varied opener, Silver Wolf handing back the tailor>",
+  "intro_zh": "<中文>",
   "strong_en": "<1-2 sentences: what's genuinely strong for this role>",
   "strong_zh": "<中文>",
   "changed_en": "<1-2 sentences: what you tuned in the rewrite, truthfully>",
@@ -1323,7 +1336,7 @@ def _generate_overview(posting_ctx, tailored_bullets):
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(tailored_bullets))
     prompt = _OVERVIEW_PROMPT.format(posting=posting_ctx, bullets=numbered)
     try:
-        data = gemma_client.ask_json_text(prompt, 1500, chain=gemma_client.FAST_CHAIN)
+        data = gemma_client.ask_json_text(prompt, 2000, chain=gemma_client.FAST_CHAIN)
     except Exception:
         log.exception("Tailor overview generation failed; skipping overview")
         return None
@@ -1552,6 +1565,70 @@ def _splice_bullets(structured, locators, rewritten):
 _BULLET_CHUNK = 6  # Flash-lite handles this fast + reliably; fewer round-trips
 
 
+# The build service's LaTeX template does HARD (non-optional) lookups on these
+# fields — a missing key returns HTTP 422 "Render error: '<field>'" and NO pdf, so
+# the preview image silently fails. Backfill every required field (empty
+# string / empty list) so ANY parsed résumé still builds. Verified against the
+# live service by probing each field. Truly optional (never break the build):
+#   contact: location, website, name · projects: technologies, date, link.
+_REQUIRED_CONTACT = ("email", "phone", "github", "linkedin")
+_REQUIRED_STR = {
+    "education": ("school", "degree", "dates", "location"),
+    "experience": ("company", "role", "dates", "location"),
+    "projects": ("name",),
+    "skills": ("category",),
+}
+_REQUIRED_LIST = {
+    "experience": ("description",),
+    "projects": ("description",),
+    "skills": ("list",),
+}
+
+
+# Minimal filler item per section, used only when a section is empty/missing (the
+# template 500s on an empty section list and 422s on a missing key). Carries every
+# required subfield so it renders as a near-invisible placeholder row.
+_SECTION_FILLER = {
+    "education": {"school": "", "degree": "", "dates": "", "location": ""},
+    "experience": {"company": "", "role": "", "dates": "", "location": "",
+                   "description": [""]},
+    "projects": {"name": "", "description": [""]},
+    "skills": {"category": "", "list": [""]},
+}
+
+
+def _ensure_builder_fields(out):
+    """In-place: guarantee every field the build service's template hard-requires
+    exists, so a résumé missing (say) a phone, an education location, or a whole
+    section still renders instead of 422/500-ing. Empty string / list for unknown
+    scalar/list fields; a single filler item for an otherwise-empty section."""
+    contact = out.get("contact")
+    if not isinstance(contact, dict):
+        contact = out["contact"] = {}
+    for key in _REQUIRED_CONTACT:
+        contact.setdefault(key, "")
+
+    # Every top-level section must exist AND hold at least one item.
+    for section, filler in _SECTION_FILLER.items():
+        items = out.get(section)
+        if not isinstance(items, list) or not items:
+            import copy as _copy
+            out[section] = [_copy.deepcopy(filler)]
+
+    for section, keys in _REQUIRED_STR.items():
+        for item in out.get(section) or []:
+            if isinstance(item, dict):
+                for key in keys:
+                    item.setdefault(key, "")
+    for section, keys in _REQUIRED_LIST.items():
+        for item in out.get(section) or []:
+            if isinstance(item, dict):
+                for key in keys:
+                    val = item.get(key)
+                    if not isinstance(val, list) or not val:
+                        item[key] = [val] if isinstance(val, str) and val else [""]
+
+
 def _apply_edu_extras(structured):
     """The resume builder's education schema is fixed (school/location/degree/
     dates) — it has no GPA or coursework fields. Fold any captured GPA into the
@@ -1561,6 +1638,8 @@ def _apply_edu_extras(structured):
     import copy
 
     out = copy.deepcopy(structured)
+
+    _ensure_builder_fields(out)
 
     coursework_all = []
     for edu in out.get("education", []) or []:
@@ -1858,6 +1937,13 @@ async def deliver_tailor(interaction, embed, file, view):
         return
 
     # DMs closed — send the result ephemerally instead (best effort).
+    # A failed DM send may have already consumed the file's stream; reset it so
+    # the fallback re-upload starts from the top instead of sending 0 bytes.
+    if file is not None:
+        try:
+            file.reset(seek=True)
+        except Exception:
+            pass
     kwargs = {"ephemeral": True}
     if embed is not None:
         kwargs["embed"] = embed
@@ -1934,20 +2020,24 @@ class MetricsModal(discord.ui.Modal):
 _TAILOR_TEXT = {
     "en": {
         "title": "✍️ Aether-Edited résumé — {company}",
-        "preview_have": (
+        # Fallback opener (used only if the AI intro didn't come back). The live
+        # opener is overview["intro_en"], varied per tailor.
+        "preview_intro_fallback": (
             "...Fine, I ran **Aether Editing** on your résumé, then ran it past my "
             "review panel — ATS parser, recruiter, hiring manager, tech lead — so "
-            "nothing slips. Don't make it weird. Preview's below — "
-            "**{filled}/{total} metrics filled**. Real numbers buff the bullets; "
-            "leave 'em blank and it falls back to the clean no-number wording. "
-            "Every word's yours — I didn't invent a thing.\n"
-            "Hit **📄 Download PDF** when you want the 1-page file."
+            "nothing slips. Don't make it weird."
         ),
-        "preview_none": (
-            "Aether Editing done — rewrote it and ran it past my panel (ATS, "
-            "recruiter, hiring manager, tech lead) so it clears every gate. "
-            "Preview's below; hit **📄 Download PDF** for the 1-page file. Only "
-            "your real stuff in there, nothing made up. ...You're welcome."
+        # Factual meta lines the bot always appends after the (AI or fallback)
+        # opener — accurate counts + instructions, never AI-authored.
+        "preview_meta_have": (
+            "Preview's below — **{filled}/{total} metrics filled**. Real numbers "
+            "buff the bullets; leave 'em blank and it falls back to the clean "
+            "no-number wording. Every word's yours — I didn't invent a thing.\n"
+            "Hit **📄 PDF** when you want the 1-page file."
+        ),
+        "preview_meta_none": (
+            "Preview's below; hit **📄 PDF** for the 1-page file. Only your real "
+            "stuff in there, nothing made up."
         ),
         "ov_name": "🐺 Silver Wolf's Read",
         "ov_strong": "💪 **Strong:**", "ov_changed": "🔧 **I tuned:**",
@@ -1958,12 +2048,17 @@ _TAILOR_TEXT = {
         "name": "👤 Name", "education": "🎓 Education", "experience": "💼 Experience",
         "projects": "🛠️ Projects", "skills": "🧩 Skills",
         "footer": "🐺 Aether-Edited by Silver Wolf • it's your build, give it one last read before you ship",
-        "add": "Add metrics ({n} left)", "edit": "Edit metrics",
-        "build_no": "Build without metrics", "download": "Download PDF",
-        "use_metrics": "Add metrics instead",
+        "add": "Metrics ({n})", "edit": "Metrics",
+        "build_no": "No metrics", "download": "PDF",
+        "use_metrics": "Metrics", "delete": "Delete",
         "builder_off_name": "⚠️ Builder offline",
         "builder_off": ("Couldn't reach the PDF builder — here's the YAML. Press "
                         "**Download PDF** to retry."),
+        "img_off_name": "🖼️ Preview image unavailable",
+        "img_off_pdf": ("Couldn't render the image this time — I attached the "
+                        "**PDF** instead, open it to read your build."),
+        "img_off_none": ("Couldn't reach the résumé builder for a preview right "
+                         "now — hit **📄 PDF** to try building the file."),
         "status_ready": ("Your **1-page** résumé's patched and ready — clean run, "
                          "cleared every gate. Take it and go get that interview; "
                          "I did my part. Preview below, click to download.\n"),
@@ -1977,17 +2072,19 @@ _TAILOR_TEXT = {
     },
     "zh": {
         "title": "✍️ 以太编辑过的简历 — {company}",
-        "preview_have": (
+        # 备用开场白（仅当 AI 没返回时用）。实际开场是 overview["intro_zh"]，每次不同。
+        "preview_intro_fallback": (
             "……行吧，我用**以太编辑**把你简历改了改，还让我的评审团——ATS、HR、"
             "招聘经理、技术面——都过了一遍，保证没死角。别搞得怪怪的。"
+        ),
+        # 机器人总会附在开场后的事实信息——数字准确，非 AI 生成。
+        "preview_meta_have": (
             "预览在下面——**已填 {filled}/{total} 个数据**。填真实数字给要点加暴击，"
             "留空的会用干净的无数字版本。每个字都是你的，我一个都没编。\n"
-            "想要一页 PDF 就点 **📄 下载 PDF**。"
+            "想要一页 PDF 就点 **📄 PDF**。"
         ),
-        "preview_none": (
-            "以太编辑完事——改好还让评审团（ATS、HR、招聘经理、技术面）都过了一遍，"
-            "每一关都能过。预览在下面，点 **📄 下载 PDF** 拿一页文件。"
-            "只装了你的真实数据，绝不刷假装备。……不用谢。"
+        "preview_meta_none": (
+            "预览在下面，点 **📄 PDF** 拿一页文件。只装了你的真实数据，绝不刷假装备。"
         ),
         "ov_name": "🐺 银狼的点评",
         "ov_strong": "💪 **强项：**", "ov_changed": "🔧 **我改了：**",
@@ -1998,11 +2095,14 @@ _TAILOR_TEXT = {
         "name": "👤 姓名", "education": "🎓 教育", "experience": "💼 经历",
         "projects": "🛠️ 项目", "skills": "🧩 技能",
         "footer": "🐺 银狼以太编辑完成 • 这是你的配装，提交前自己再过一遍",
-        "add": "填写数据（还剩 {n} 个）", "edit": "修改数据",
-        "build_no": "不填数据直接生成", "download": "下载 PDF",
-        "use_metrics": "改为填写数据",
+        "add": "数据（{n}）", "edit": "数据",
+        "build_no": "不填数据", "download": "PDF",
+        "use_metrics": "数据", "delete": "删除",
         "builder_off_name": "⚠️ 生成器离线",
         "builder_off": "连不上 PDF 生成器——先给你 YAML。点 **下载 PDF** 重试。",
+        "img_off_name": "🖼️ 预览图暂不可用",
+        "img_off_pdf": "这次没能渲染成图片——我把 **PDF** 附上了，打开就能看你的配装。",
+        "img_off_none": "现在连不上简历生成器做预览——点 **📄 PDF** 试试生成文件。",
         "status_ready": "你的**一页**简历补丁打好了——干净通关，每道门都过了。拿去把面试拿下，我这边做完了。下方预览，点击下载。\n",
         "status_no_metrics": "*没填数据直接出——每条要点用的都是干净的无数字版本。照样能打，别慌。*",
         "status_real": "*只用你的真实数据，我不刷假装备。*",
@@ -2105,9 +2205,15 @@ class TailorView(discord.ui.View):
                 if block:
                     embed.add_field(name=label, value=block[:1024], inline=False)
 
-    def preview_embed(self):
-        """A readable, in-Discord preview of the tailored resume (no PDF yet).
-        Shows the assembled sections so the user can read it before building."""
+    def preview_embed(self, with_body=False):
+        """Preview embed for the tailored résumé. Defaults to with_body=False:
+        the résumé is shown as the rendered IMAGE (or attached PDF), never as raw
+        text sections — the embed carries only the title, Silver Wolf's varied
+        opener/read, and the review.
+
+        with_body=True re-enables the legacy text sections (name/edu/experience/
+        projects/skills). It is intentionally NOT used by the live preview path —
+        kept only for any explicit text-only caller."""
         import yaml as _yaml
 
         try:
@@ -2120,17 +2226,31 @@ class TailorView(discord.ui.View):
             title=t["title"].format(company=self.company)[:256],
             color=_SW_PURPLE,  # Silver Wolf violet, matching the Score embed
         )
+        # Opener: the AI-varied intro (different every tailor) + the factual meta
+        # line the bot always controls (accurate metric counts + download hint).
+        ov = self.blob.get("overview")
+        intro = ""
+        if isinstance(ov, dict):
+            intro = str(ov.get(f"intro_{self.lang}") or ov.get("intro_en") or "").strip()
+        if not intro:
+            intro = t["preview_intro_fallback"]
         total = self.n_total
         if total:
-            embed.description = t["preview_have"].format(
-                filled=self.n_filled, total=total
-            )
+            meta = t["preview_meta_have"].format(filled=self.n_filled, total=total)
         else:
-            embed.description = t["preview_none"]
+            meta = t["preview_meta_none"]
+        embed.description = f"{intro}\n\n{meta}"[:4096]
 
         # Silver Wolf's read: what's strong / what she changed / what still needs
         # you. Rendered right at the top so the user gets the overview first.
         self._add_overview_field(embed, t)
+
+        if not with_body:
+            # Résumé itself is shown as the attached image — skip the text sections,
+            # keep only the review below the overview.
+            self._add_review_fields(embed, t)
+            embed.set_footer(text=t["footer"])
+            return embed
 
         name = str(data.get("name") or "").strip()
         if name:
@@ -2188,6 +2308,50 @@ class TailorView(discord.ui.View):
 
         embed.set_footer(text=t["footer"])
         return embed
+
+    async def preview_render(self):
+        """Async preview: render the CURRENT (pre-metrics, no-metric) résumé to a
+        real PDF, rasterize page 1 to a PNG, and return (embed, file) with that
+        image set on the embed — so the user sees the unfinished résumé as an
+        IMAGE, never the raw text sections. If the image can't be produced (builder
+        offline / raster failed) we attach the PDF and say so — but we STILL never
+        dump the résumé text into the embed. Never raises."""
+        png = None
+        pdf = None
+        try:
+            # Preview uses the no-metric version of every bullet (the "unfinished"
+            # résumé) so the image is meaningful before any metric is entered.
+            yaml_text = _blob_to_yaml(
+                self.blob, {i: _SKIP for i in self.metric_indices}
+            )
+            pdf = await asyncio.to_thread(_build_pdf_sync, yaml_text)
+            if pdf:
+                png = await asyncio.to_thread(_pdf_to_png, pdf)
+        except Exception:
+            log.exception("Tailor preview render failed")
+            png = None
+
+        # Always with_body=False — the résumé itself is shown as the image (or the
+        # attached PDF on fallback), NEVER as text fields in the embed.
+        embed = self.preview_embed(with_body=False)
+        if png:
+            embed.set_image(url="attachment://resume_preview.png")
+            return embed, discord.File(io_bytes(png), filename="resume_preview.png")
+        if pdf:
+            # Couldn't rasterize but the PDF built — attach it, tell them to open it.
+            t = _TAILOR_TEXT.get(self.lang, _TAILOR_TEXT["en"])
+            embed.add_field(
+                name=t["img_off_name"], value=t["img_off_pdf"], inline=False
+            )
+            return embed, discord.File(
+                io_bytes(pdf), filename=f"resume_{self.safe_company}.pdf"
+            )
+        # Builder fully offline — no image, no PDF. Note it; still no text dump.
+        t = _TAILOR_TEXT.get(self.lang, _TAILOR_TEXT["en"])
+        embed.add_field(
+            name=t["img_off_name"], value=t["img_off_none"], inline=False
+        )
+        return embed, None
 
     def status_embed(self):
         t = _TAILOR_TEXT.get(self.lang, _TAILOR_TEXT["en"])
@@ -2247,17 +2411,18 @@ class TailorView(discord.ui.View):
         return embed
 
     def default_embed(self):
-        """Which embed to show right now: the read-only preview until the user
-        starts building, then the status board on rebuilds."""
-        return self.preview_embed()
+        """Read-only preview embed WITHOUT the text résumé body (the résumé is
+        only ever shown as the rendered image / PDF, never dumped as text)."""
+        return self.preview_embed(with_body=False)
 
     def _build_buttons(self):
         self.clear_items()
         t = _TAILOR_TEXT.get(self.lang, _TAILOR_TEXT["en"])
 
-        # 🌐 language toggle — flips chat labels/notes (résumé stays English).
+        # Language toggle — flips chat labels/notes (résumé stays English).
+        # Compact + high-contrast: plain text, no faint globe glyph.
         lang_btn = discord.ui.Button(
-            label="🌐 中文" if self.lang == "en" else "🌐 English",
+            label="中文 / EN",
             style=discord.ButtonStyle.secondary,
         )
         lang_btn.callback = self._on_lang
@@ -2294,14 +2459,60 @@ class TailorView(discord.ui.View):
             back.callback = self._on_use_metrics
             self.add_item(back)
 
+        # 🗑️ Delete — remove this bot message (works in the DM copy + ephemeral).
+        # Lets the user clear the tailored résumé from their DMs when done.
+        delete = discord.ui.Button(
+            emoji="🗑️", style=discord.ButtonStyle.danger
+        )
+        delete.callback = self._on_delete
+        self.add_item(delete)
+
     # --- actions ----------------------------------------------------------
+    async def _on_delete(self, interaction):
+        """Delete the message this view is attached to. In a DM the bot owns the
+        message, so message.delete() works. Ephemeral messages can't be truly
+        deleted, so fall back to collapsing them to a tombstone."""
+        msg = interaction.message
+        try:
+            if msg is not None:
+                await msg.delete()
+                # DM delete succeeds without needing an interaction response.
+                if not interaction.response.is_done():
+                    try:
+                        await interaction.response.defer()
+                    except Exception:
+                        pass
+                return
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+        except Exception:
+            log.exception("Tailor delete-button failed")
+        # Ephemeral (can't delete) → blank it out instead.
+        try:
+            await interaction.response.edit_message(
+                content="🗑️ *Cleared.*", embed=None, attachments=[], view=None
+            )
+        except Exception:
+            pass
+
     async def _on_lang(self, interaction):
         self.lang = "zh" if self.lang == "en" else "en"
         self._build_buttons()
-        # Re-render whichever embed is currently showing (preview by default).
-        await interaction.response.edit_message(
-            embed=self.default_embed(), view=self
-        )
+        # Re-render the image preview in the new language (labels/overview/review
+        # localize; the résumé image itself is English either way). Defer first —
+        # the PDF build + raster is too slow for a 3s interaction response.
+        await interaction.response.defer()
+        embed, file = await self.preview_render()
+        kwargs = {"embed": embed, "view": self}
+        kwargs["attachments"] = [file] if file is not None else []
+        try:
+            await interaction.edit_original_response(**kwargs)
+        except Exception:
+            # Fallback: no-body embed, no image (e.g. attachment edit rejected).
+            # Still never dumps the résumé text.
+            await interaction.edit_original_response(
+                embed=self.preview_embed(with_body=False), view=self, attachments=[]
+            )
 
     async def _on_add(self, interaction):
         # One combined button → open page 1; further pages appear only if needed.
@@ -2389,7 +2600,7 @@ async def run_tailor(db, user, table, row_id, progress=None):
 
 # Bump when the Tailor prompt / blob schema changes so stale caches (old voice,
 # old bullet variants) are ignored and regenerated with the current prompt.
-_TAILOR_BLOB_VERSION = 24
+_TAILOR_BLOB_VERSION = 25
 
 
 def _dump_blob(blob):
@@ -2519,5 +2730,6 @@ async def _finish_tailor(row, blob):
     """
     company = row.get("company_name") or "role"
     view = TailorView(blob, company)
-    embed = view.preview_embed()
-    return embed, None, view, None
+    # Render the unfinished résumé to a viewable image (falls back to text preview).
+    embed, file = await view.preview_render()
+    return embed, file, view, None

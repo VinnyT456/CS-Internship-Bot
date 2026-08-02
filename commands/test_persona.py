@@ -9,6 +9,8 @@ Two kinds:
       /testscore_layout → instant Score layout with fake data
   • LIVE voice checks (call the REAL model, so you hear the ACTUAL Silver Wolf
     voice — needs the AI key configured):
+      /testtailor_live         → really tailors the sample résumé (real AI
+                                 bullets + image + review + before→after diff)
       /testhelpme <question>   → runs /helpme's real prompt
       /testinterview <role>    → runs /interview's real prompt
       /testrecommend           → runs /recommend's real prompt on a sample menu
@@ -18,7 +20,10 @@ import asyncio
 
 import discord
 
-from commands import ai_commands, commands_board, gemma_client, job_ai, lang_view, persona
+from commands import (
+    ai_commands, commands_board, gemma_client, job_ai, lang_view, persona,
+    resume_utils,
+)
 
 
 # --- fake data ------------------------------------------------------------
@@ -177,6 +182,8 @@ _FAKE_BLOB = {
          "n": "Automated posting discovery by scraping with Python"},
     ],
     "overview": {
+        "intro_en": "...Alright, I ran Aether Editing on your build and dragged it past the whole review panel — ATS, recruiter, hiring manager, tech lead. Nothing slipped. Read it below.",
+        "intro_zh": "……行吧，我给你的配装跑了遍以太编辑，还拖着整个评审团过了一轮——ATS、HR、招聘经理、技术面，一个死角都没留。下面自己看。",
         "strong_en": "Your Python and REST API work is dead-on for this role — that's the core of what they want, and it's real.",
         "strong_zh": "你的 Python 和 REST API 正对这个岗位——这是他们要的核心，而且是真本事。",
         "changed_en": "I surfaced 'REST API' as an exact keyword, front-loaded your Python work, and tightened the bullets to one clean line each.",
@@ -229,6 +236,43 @@ _SAMPLE_POSTING = {
     "job_tags": ["Python", "REST APIs", "SQL", "AWS", "CI/CD"],
     "company_info": {},
 }
+
+
+def _explain_bullet_changes(pairs, row):
+    """One batched FAST call: for each (before, after) bullet, return a short
+    plain-English reason the rewrite is better FOR THIS POSTING. Returns a list of
+    strings (same length as pairs); '' for anything the model drops. Never raises —
+    a failed call just yields empty reasons so the before→after still shows."""
+    pairs = [(b or "", a or "") for b, a in pairs]
+    if not pairs:
+        return []
+    numbered = "\n".join(
+        f"{i + 1}. BEFORE: {b}\n   AFTER: {a}" for i, (b, a) in enumerate(pairs)
+    )
+    prompt = (
+        "You are a résumé coach. For EACH numbered bullet below, give ONE short "
+        "reason (max ~15 words) why the AFTER version is stronger for this job "
+        "posting — name the concrete change (surfaced a keyword, led with impact, "
+        "tightened wording, added a metric slot, etc.). Plain English, no fluff.\n\n"
+        f"<posting>\n{job_ai._job_context(row)}\n</posting>\n\n"
+        f"<bullets>\n{numbered}\n</bullets>\n\n"
+        "Return ONLY a JSON array of strings, one reason per bullet, in order: "
+        '["reason 1", "reason 2", ...]'
+    )
+    try:
+        data = gemma_client.ask_json_text(
+            prompt, 1200, chain=gemma_client.FAST_CHAIN
+        )
+    except Exception:
+        return ["" for _ in pairs]
+    if isinstance(data, dict):
+        # Model sometimes wraps the array — grab the first list value.
+        data = next((v for v in data.values() if isinstance(v, list)), None)
+    if not isinstance(data, list):
+        return ["" for _ in pairs]
+    out = [str(x).strip() for x in data]
+    out += [""] * (len(pairs) - len(out))
+    return out[: len(pairs)]
 
 
 def register(bot, *, logger=None):
@@ -299,11 +343,79 @@ def register(bot, *, logger=None):
     )
     @admin
     async def testtailor(interaction: discord.Interaction):
-        # One embed: the tailored build AND Silver Wolf's full review folded in.
+        # One embed: the tailored résumé IMAGE + Silver Wolf's full review folded in.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         tailor = job_ai.TailorView(_FAKE_BLOB, "Palantir Technologies")
-        await interaction.response.send_message(
-            embed=tailor.preview_embed(), view=tailor, ephemeral=True
+        embed, file = await tailor.preview_render()
+        kwargs = {"embed": embed, "view": tailor, "ephemeral": True}
+        if file is not None:
+            kwargs["file"] = file
+        await interaction.followup.send(**kwargs)
+
+    @bot.tree.command(
+        name="testtailor_live",
+        description="[test] LIVE: really tailor the sample résumé — one embed: image + review + before→after+why",
+    )
+    @admin
+    async def testtailor_live(interaction: discord.Interaction):
+        # End-to-end REAL tailor: parse the sample résumé → run the actual
+        # _tailor_build pipeline (rewrite → multi-actor review → overview/review)
+        # → real TailorView + rendered image. This is what an actual user gets, so
+        # you can SEE the tailoring effect (original bullets → AI-rewritten ones).
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        structured = await asyncio.to_thread(
+            resume_utils.parse_structured, _SAMPLE_RESUME, None
         )
+        if not structured:
+            await interaction.followup.send(
+                "Couldn't parse the sample résumé — is the AI key configured? "
+                "(This hits the real model.)",
+                ephemeral=True,
+            )
+            return
+        blob = await job_ai._tailor_build(structured, _SAMPLE_POSTING)
+        if not blob or not blob.get("bullets"):
+            await interaction.followup.send(
+                "The tailor build came back empty — check the AI key / logs.",
+                ephemeral=True,
+            )
+            return
+        company = _SAMPLE_POSTING.get("company_name") or "role"
+        tailor = job_ai.TailorView(blob, company)
+        embed, file = await tailor.preview_render()
+
+        # Fold the BEFORE → AFTER diff (with a short WHY per bullet) into this SAME
+        # embed so the whole tailoring effect is one message, not two.
+        _orig_locs, orig_texts = job_ai._collect_bullets(structured)
+        bullets = blob.get("bullets", [])
+        pairs = []
+        for i, b in enumerate(bullets):
+            before = orig_texts[i] if i < len(orig_texts) else ""
+            after = (b.get("m") or b.get("n") or "").strip()
+            pairs.append((before, after))
+        whys = await asyncio.to_thread(_explain_bullet_changes, pairs, _SAMPLE_POSTING)
+
+        embed.add_field(
+            name="🔬 Tailoring effect — before → after",
+            value="Original bullet → Silver Wolf's rewrite for this posting, and why.",
+            inline=False,
+        )
+        for i, (before, after) in enumerate(pairs[:5]):
+            why = whys[i] if i < len(whys) else ""
+            val = f"**Before:** {before}\n**After:** {after}"
+            if why:
+                val += f"\n**Why:** {why}"
+            embed.add_field(name=f"Bullet {i + 1}", value=val[:1024], inline=False)
+        if len(pairs) > 5:
+            embed.add_field(
+                name="​", value=f"…and {len(pairs) - 5} more bullets (showing first 5)",
+                inline=False,
+            )
+
+        kwargs = {"embed": embed, "view": tailor, "ephemeral": True}
+        if file is not None:
+            kwargs["file"] = file
+        await interaction.followup.send(**kwargs)
 
     @bot.tree.command(name="testguide", description="[test] Preview the bilingual command guide")
     @admin

@@ -1039,10 +1039,25 @@ async def sweep_closed_status():
         results = await asyncio.to_thread(_check_closed_batch, rows)
 
         closed_rows = [row for row, is_closed in results if is_closed is True]
+        determined = [(row, st) for row, st in results if st is not None]
+        undetermined = len(results) - len(determined)
         logger.info(
-            "Closed-check %s: %d checked, %d newly closed",
-            table, len(results), len(closed_rows),
+            "Closed-check %s: %d checked, %d determined, %d undetermined, %d newly closed",
+            table, len(results), len(determined), undetermined, len(closed_rows),
         )
+
+        # Network/DNS wipeout guard: if the ENTIRE batch came back undetermined
+        # (None), the network — not the jobs — is the problem (e.g. DNS "nodename
+        # nor servname provided"). Stamping them checked would rotate real closed
+        # jobs to the back of the queue for a full cycle. Skip this table's sweep
+        # entirely so the same rows retry on the next tick.
+        if results and not determined:
+            logger.warning(
+                "Closed-check %s: whole batch undetermined (network down?) — "
+                "skipping stamp so rows retry next tick",
+                table,
+            )
+            continue
 
         channel = await get_cached_channel(cache_key, channel_id)
         for row in closed_rows:
