@@ -172,14 +172,23 @@ _FAKE_BLOB = {
     },
     "bullets": [
         {"loc": ["experience", 0, 0],
+         "before": "Worked on REST APIs in Python",
          "m": "Built REST APIs as measured by [ADD METRIC] by developing in Python",
-         "n": "Built REST APIs by developing in Python"},
+         "n": "Built REST APIs by developing in Python",
+         "why": {"en": "Led with impact, reshaped to XYZ form, added a metric slot.",
+                 "zh": "先讲成果，改成 XYZ 格式，留了数字槽位。"}},
         {"loc": ["experience", 0, 1],
+         "before": "Responsible for writing unit tests",
          "m": "Improved reliability as measured by [ADD METRIC] by writing unit tests",
-         "n": "Improved reliability by writing unit tests"},
+         "n": "Improved reliability by writing unit tests",
+         "why": {"en": "Swapped 'responsible for' for a real outcome + metric slot.",
+                 "zh": "把「负责」换成真实成果，加了数字槽位。"}},
         {"loc": ["projects", 0, 0],
+         "before": "Scraped job boards with Python",
          "m": "Automated posting discovery as measured by [ADD METRIC] by scraping with Python",
-         "n": "Automated posting discovery by scraping with Python"},
+         "n": "Automated posting discovery by scraping with Python",
+         "why": {"en": "Named the outcome (automation) + XYZ form + metric slot.",
+                 "zh": "点明成果（自动化）+ XYZ 格式 + 数字槽位。"}},
     ],
     "overview": {
         "intro_en": "...Alright, I ran Aether Editing on your build and dragged it past the whole review panel — ATS, recruiter, hiring manager, tech lead. Nothing slipped. Read it below.",
@@ -236,43 +245,6 @@ _SAMPLE_POSTING = {
     "job_tags": ["Python", "REST APIs", "SQL", "AWS", "CI/CD"],
     "company_info": {},
 }
-
-
-def _explain_bullet_changes(pairs, row):
-    """One batched FAST call: for each (before, after) bullet, return a short
-    plain-English reason the rewrite is better FOR THIS POSTING. Returns a list of
-    strings (same length as pairs); '' for anything the model drops. Never raises —
-    a failed call just yields empty reasons so the before→after still shows."""
-    pairs = [(b or "", a or "") for b, a in pairs]
-    if not pairs:
-        return []
-    numbered = "\n".join(
-        f"{i + 1}. BEFORE: {b}\n   AFTER: {a}" for i, (b, a) in enumerate(pairs)
-    )
-    prompt = (
-        "You are a résumé coach. For EACH numbered bullet below, give ONE short "
-        "reason (max ~15 words) why the AFTER version is stronger for this job "
-        "posting — name the concrete change (surfaced a keyword, led with impact, "
-        "tightened wording, added a metric slot, etc.). Plain English, no fluff.\n\n"
-        f"<posting>\n{job_ai._job_context(row)}\n</posting>\n\n"
-        f"<bullets>\n{numbered}\n</bullets>\n\n"
-        "Return ONLY a JSON array of strings, one reason per bullet, in order: "
-        '["reason 1", "reason 2", ...]'
-    )
-    try:
-        data = gemma_client.ask_json_text(
-            prompt, 1200, chain=gemma_client.FAST_CHAIN
-        )
-    except Exception:
-        return ["" for _ in pairs]
-    if isinstance(data, dict):
-        # Model sometimes wraps the array — grab the first list value.
-        data = next((v for v in data.values() if isinstance(v, list)), None)
-    if not isinstance(data, list):
-        return ["" for _ in pairs]
-    out = [str(x).strip() for x in data]
-    out += [""] * (len(pairs) - len(out))
-    return out[: len(pairs)]
 
 
 def register(bot, *, logger=None):
@@ -382,36 +354,9 @@ def register(bot, *, logger=None):
             return
         company = _SAMPLE_POSTING.get("company_name") or "role"
         tailor = job_ai.TailorView(blob, company)
+        # preview_render now shows image + review + the per-bullet before→after+why
+        # (from the blob) — identical to what a real tailor-button user gets.
         embed, file = await tailor.preview_render()
-
-        # Fold the BEFORE → AFTER diff (with a short WHY per bullet) into this SAME
-        # embed so the whole tailoring effect is one message, not two.
-        _orig_locs, orig_texts = job_ai._collect_bullets(structured)
-        bullets = blob.get("bullets", [])
-        pairs = []
-        for i, b in enumerate(bullets):
-            before = orig_texts[i] if i < len(orig_texts) else ""
-            after = (b.get("m") or b.get("n") or "").strip()
-            pairs.append((before, after))
-        whys = await asyncio.to_thread(_explain_bullet_changes, pairs, _SAMPLE_POSTING)
-
-        embed.add_field(
-            name="🔬 Tailoring effect — before → after",
-            value="Original bullet → Silver Wolf's rewrite for this posting, and why.",
-            inline=False,
-        )
-        for i, (before, after) in enumerate(pairs[:5]):
-            why = whys[i] if i < len(whys) else ""
-            val = f"**Before:** {before}\n**After:** {after}"
-            if why:
-                val += f"\n**Why:** {why}"
-            embed.add_field(name=f"Bullet {i + 1}", value=val[:1024], inline=False)
-        if len(pairs) > 5:
-            embed.add_field(
-                name="​", value=f"…and {len(pairs) - 5} more bullets (showing first 5)",
-                inline=False,
-            )
-
         kwargs = {"embed": embed, "view": tailor, "ephemeral": True}
         if file is not None:
             kwargs["file"] = file

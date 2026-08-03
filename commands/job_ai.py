@@ -1414,6 +1414,51 @@ def _generate_review(posting_ctx, tailored_bullets):
     return data if isinstance(data, dict) else None
 
 
+def _generate_change_notes(posting_ctx, before_after):
+    """For each (before, after) bullet pair, a SHORT bilingual reason the rewrite
+    is stronger for this posting (surfaced a keyword, led with impact, added the
+    XYZ metric slot, etc.). One FAST call. Returns a list of {en, zh} dicts aligned
+    to before_after; '' for anything dropped. Never raises."""
+    pairs = [(str(b or "").strip(), str(a or "").strip()) for b, a in before_after]
+    if not pairs:
+        return []
+    numbered = "\n".join(
+        f"{i + 1}. BEFORE: {b}\n   AFTER: {a}" for i, (b, a) in enumerate(pairs)
+    )
+    prompt = (
+        "You are a résumé coach. For EACH numbered bullet, give ONE short reason "
+        "(max ~15 words) why the AFTER version is stronger FOR THIS POSTING — name "
+        "the concrete change: surfaced a posting keyword, led with impact/outcome, "
+        "reshaped into Google's XYZ form (accomplished X, measured by [metric], by "
+        "doing Z), tightened wording, added a metric slot to fill, etc. Plain, no "
+        "fluff. Truthful — describe only what actually changed between BEFORE and "
+        "AFTER.\n\n"
+        f"<posting>\n{posting_ctx}\n</posting>\n\n"
+        f"<bullets>\n{numbered}\n</bullets>\n\n"
+        "Return ONLY a JSON array, one object per bullet IN ORDER, each with a "
+        'natural-English "en" and native Simplified-Chinese "zh" reason:\n'
+        '[{"en": "...", "zh": "..."}, ...]'
+    )
+    try:
+        data = gemma_client.ask_json_text(prompt, 1600, chain=gemma_client.FAST_CHAIN)
+    except Exception:
+        log.exception("Change-notes generation failed; skipping why notes")
+        return [{"en": "", "zh": ""} for _ in pairs]
+    if isinstance(data, dict):
+        data = next((v for v in data.values() if isinstance(v, list)), None)
+    if not isinstance(data, list):
+        return [{"en": "", "zh": ""} for _ in pairs]
+    out = []
+    for x in data:
+        if isinstance(x, dict):
+            out.append({"en": str(x.get("en", "")).strip(),
+                        "zh": str(x.get("zh", "")).strip()})
+        else:
+            out.append({"en": str(x).strip(), "zh": ""})
+    out += [{"en": "", "zh": ""}] * (len(pairs) - len(out))
+    return out[: len(pairs)]
+
+
 def _review_and_refine(posting_ctx, metric_bullets):
     """Run the tailored bullets past the multi-actor review panel and return the
     refined list (same length/order). One FAST-tier call role-plays all four
@@ -1800,13 +1845,22 @@ async def _tailor_build(structured, row, progress=None):
     if progress:
         await progress(len(chunks) + 1, total)
 
+    # Before → after pairs (original bullet vs the tailored metric version), for
+    # the per-bullet "what changed & why" notes shown in the preview embed.
+    before_after = [
+        (texts[i] if i < len(texts) else "", m)
+        for i, m in enumerate(metric_bullets)
+    ]
+
     # One cheap batched pass for the clean no-metric variants, plus Silver Wolf's
-    # overview AND her fuller review — all run concurrently so they add no extra
-    # wall-clock. Overview + review render together in the one preview embed.
-    nometrics, overview, review = await asyncio.gather(
+    # overview, her fuller review, AND the per-bullet change notes — all run
+    # concurrently so they add no extra wall-clock. Everything renders in the one
+    # preview embed.
+    nometrics, overview, review, changes = await asyncio.gather(
         asyncio.to_thread(_polish_nometrics, posting_ctx, metric_bullets),
         asyncio.to_thread(_generate_overview, posting_ctx, metric_bullets),
         asyncio.to_thread(_generate_review, posting_ctx, metric_bullets),
+        asyncio.to_thread(_generate_change_notes, posting_ctx, before_after),
     )
     if progress:
         await progress(total, total)
@@ -1816,6 +1870,9 @@ async def _tailor_build(structured, row, progress=None):
             "loc": list(loc),
             "m": m,
             "n": nometrics[i] if i < len(nometrics) else _strip_metric_phrase(m),
+            # Original bullet + why-this-changed note, for the before→after display.
+            "before": texts[i] if i < len(texts) else "",
+            "why": changes[i] if i < len(changes) else {"en": "", "zh": ""},
         }
         for i, (loc, m) in enumerate(zip(locators, metric_bullets))
     ]
@@ -1831,11 +1888,17 @@ _METRIC_TOKEN = "[ADD METRIC]"
 _MODAL_PAGE = 5  # Discord modal hard limit is 5 inputs
 
 
-def _blob_to_yaml(blob, values=None):
+def _blob_to_yaml(blob, values=None, keep_token=False):
     """Assemble resume YAML from a tailor blob. For each tailored bullet: if a
     metric value is provided (non-empty, non-skip), use the metric version with
     [ADD METRIC] replaced by that value; otherwise use the clean no-metric
     version. `values` is a dict {bullet_index: value}. Education/skills untouched.
+
+    keep_token=True is the PREVIEW mode: an unfilled (blank, not explicitly
+    skipped) slot keeps the literal [ADD METRIC] in the metric version so the
+    preview image SHOWS the user where to drop real numbers. This mode must NEVER
+    be used for the final downloadable PDF — a placeholder must never reach a
+    recruiter/ATS — only for the on-screen preview.
     """
     import copy
 
@@ -1848,12 +1911,17 @@ def _blob_to_yaml(blob, values=None):
         val = str(values.get(idx, "") or "").strip()
         if val and val != _SKIP:
             text = (b.get("m") or b.get("n") or "").replace(_METRIC_TOKEN, val)
+        elif keep_token and val != _SKIP and _METRIC_TOKEN in (b.get("m") or ""):
+            # Preview: blank (not skipped) slot → show the metric version WITH the
+            # [ADD METRIC] placeholder intact so the user sees where numbers go.
+            text = b.get("m") or b.get("n") or ""
         else:
             # Blank / skipped → the clean no-metric version.
             text = b.get("n") or _strip_metric_phrase(b.get("m", ""))
-        # Safety: a placeholder must NEVER reach a recruiter/ATS. If the
-        # no-metric fallback somehow still carries the token, strip it clean.
-        if _METRIC_TOKEN in text:
+        # Safety: outside preview mode a placeholder must NEVER reach a
+        # recruiter/ATS. If the no-metric fallback somehow still carries the
+        # token, strip it clean.
+        if _METRIC_TOKEN in text and not keep_token:
             text = _strip_metric_phrase(text)
         try:
             structured[sec][i]["description"][j] = text
@@ -2059,6 +2127,16 @@ _TAILOR_TEXT = {
                         "**PDF** instead, open it to read your build."),
         "img_off_none": ("Couldn't reach the résumé builder for a preview right "
                          "now — hit **📄 PDF** to try building the file."),
+        "author": "🐺 Silver Wolf · Aether-Edited résumé",
+        "mb_name": "📊 Metrics · {filled}/{total}",
+        "mb_todo": ("**{left}** slot(s) left. Real numbers hit harder — tap **📊 "
+                    "Metrics** to load them, or leave blank for the clean version."),
+        "mb_done": "All loaded. Clean run — go download it.",
+        "ch_name": "🔬 What I changed — before → after",
+        "ch_intro": ("Your original → my rewrite (XYZ form, **[ADD METRIC]** = drop "
+                     "a real number here). Showing the first few."),
+        "ch_before": "Before", "ch_after": "After", "ch_why": "Why",
+        "ch_bullet": "Bullet {n}", "ch_more": "…+{n} more bullets (showing first {shown})",
         "status_ready": ("Your **1-page** résumé's patched and ready — clean run, "
                          "cleared every gate. Take it and go get that interview; "
                          "I did my part. Preview below, click to download.\n"),
@@ -2103,6 +2181,16 @@ _TAILOR_TEXT = {
         "img_off_name": "🖼️ 预览图暂不可用",
         "img_off_pdf": "这次没能渲染成图片——我把 **PDF** 附上了，打开就能看你的配装。",
         "img_off_none": "现在连不上简历生成器做预览——点 **📄 PDF** 试试生成文件。",
+        "author": "🐺 银狼 · 以太编辑简历",
+        "mb_name": "📊 数据 · {filled}/{total}",
+        "mb_todo": ("还剩 **{left}** 个槽位。真实数字更有杀伤力——点 **📊 数据** 填上，"
+                    "或者留空用干净版本。"),
+        "mb_done": "全填好了。干净通关——下载走人。",
+        "ch_name": "🔬 我改了啥 — 前 → 后",
+        "ch_intro": ("你的原文 → 我的改写（XYZ 格式，**[ADD METRIC]** = 这里填真实数字）。"
+                     "只显示前几条。"),
+        "ch_before": "改前", "ch_after": "改后", "ch_why": "原因",
+        "ch_bullet": "要点 {n}", "ch_more": "…还有 {n} 条（只显示前 {shown} 条）",
         "status_ready": "你的**一页**简历补丁打好了——干净通关，每道门都过了。拿去把面试拿下，我这边做完了。下方预览，点击下载。\n",
         "status_no_metrics": "*没填数据直接出——每条要点用的都是干净的无数字版本。照样能打，别慌。*",
         "status_real": "*只用你的真实数据，我不刷假装备。*",
@@ -2153,10 +2241,30 @@ class TailorView(discord.ui.View):
         return _blob_to_yaml(self.blob, vals)
 
     # --- rendering --------------------------------------------------------
-    def _add_overview_field(self, embed, t):
-        """Add Silver Wolf's overview (strong / changed / still-needs-you) to the
-        preview embed, in the current language. No-op if the model didn't produce
-        one (the tailor works fine without it)."""
+    def _add_metric_banner(self, embed, t):
+        """A prominent metric-status field near the top — surfaces the [ADD METRIC]
+        call-to-action instead of burying it in the description. Skipped in
+        no-metrics mode / when there are no slots."""
+        total = self.n_total
+        if not total or self.no_metrics:
+            return
+        filled = self.n_filled
+        blocks = "🟪" * filled + "⬜" * (total - filled)
+        if filled >= total:
+            body = t["mb_done"]
+        else:
+            body = t["mb_todo"].format(left=total - filled)
+        embed.add_field(
+            name=t["mb_name"].format(filled=filled, total=total),
+            value=f"{blocks}\n{body}",
+            inline=False,
+        )
+
+    def _add_read_field(self, embed, t):
+        """Silver Wolf's read — merged from overview (strong/tuned/todo). One tight
+        block so the user gets the story at a glance, no wall of overlapping text.
+        Impression from the review is intentionally dropped (it duplicates the
+        description opener)."""
         ov = self.blob.get("overview")
         if not isinstance(ov, dict):
             return
@@ -2167,8 +2275,7 @@ class TailorView(discord.ui.View):
             ("changed", t["ov_changed"]),
             ("todo", t["ov_todo"]),
         ):
-            val = ov.get(f"{key}_{lang}") or ov.get(f"{key}_en") or ""
-            val = str(val).strip()
+            val = str(ov.get(f"{key}_{lang}") or ov.get(f"{key}_en") or "").strip()
             if val:
                 parts.append(f"{label} {val}")
         if parts:
@@ -2176,11 +2283,10 @@ class TailorView(discord.ui.View):
                 name=t["ov_name"], value="\n".join(parts)[:1024], inline=False
             )
 
-    def _add_review_fields(self, embed, t):
-        """Fold Silver Wolf's fuller review (impression / strengths / improvements
-        / ATS gaps) into this same preview embed, in the current language. This is
-        the /reviewresume content merged in — one embed, not two. No-op if the
-        model didn't produce a review (the tailor works fine without it)."""
+    def _add_scan_fields(self, embed, t):
+        """The recruiter/ATS scan as a scannable INLINE trio — Strengths · Fix ·
+        ATS gaps sit side-by-side (Discord lays out up to 3 inline fields per row)
+        so the whole read is one glance, not three stacked walls."""
         rv = self.blob.get("review")
         if not isinstance(rv, dict):
             return
@@ -2189,9 +2295,7 @@ class TailorView(discord.ui.View):
         def _pick(base):
             return rv.get(f"{base}_{lang}") or rv.get(f"{base}_en") or rv.get(base)
 
-        imp = str(_pick("impression") or "").strip()
-        if imp:
-            embed.add_field(name=t["rv_impression"], value=imp[:1024], inline=False)
+        rendered = 0
         for base, label in (
             ("strengths", t["rv_strengths"]),
             ("improvements", t["rv_improvements"]),
@@ -2200,10 +2304,48 @@ class TailorView(discord.ui.View):
             items = _pick(base)
             if isinstance(items, list) and items:
                 block = "\n".join(
-                    f"• {str(x).strip()}" for x in items[:4] if str(x).strip()
+                    f"• {str(x).strip()}" for x in items[:3] if str(x).strip()
                 )
                 if block:
-                    embed.add_field(name=label, value=block[:1024], inline=False)
+                    embed.add_field(name=label, value=block[:1024], inline=True)
+                    rendered += 1
+        # Discord pads the last row; a 2-field row looks lopsided, so add a spacer
+        # to keep the inline grid even.
+        if rendered == 2:
+            embed.add_field(name="​", value="​", inline=True)
+
+    def _add_change_fields(self, embed, t, limit=3):
+        """The tailoring effect per bullet — original → rewrite (XYZ form with the
+        [ADD METRIC] slot) → why — compact: the BEFORE is a muted blockquote, the
+        AFTER is emphasised (it's the thing they keep), the WHY is a dim one-liner.
+        This is what makes the metric request visible. No-op on older caches."""
+        bullets = self.blob.get("bullets") or []
+        rows = [
+            b for b in bullets
+            if isinstance(b, dict) and str(b.get("before") or "").strip()
+        ]
+        if not rows:
+            return
+        lang = self.lang
+        embed.add_field(name=t["ch_name"], value=t["ch_intro"], inline=False)
+        for i, b in enumerate(rows[:limit]):
+            before = str(b.get("before") or "").strip()
+            after = str(b.get("m") or b.get("n") or "").strip()
+            why = b.get("why") or {}
+            why_txt = str(why.get(lang) or why.get("en") or "").strip()
+            # Blockquoted before (muted) → arrow → bold after → dim why.
+            val = f"> {before}\n**→ {after}**"
+            if why_txt:
+                val += f"\n*{why_txt}*"
+            embed.add_field(
+                name=t["ch_bullet"].format(n=i + 1), value=val[:1024], inline=False
+            )
+        if len(rows) > limit:
+            embed.add_field(
+                name="​",
+                value=t["ch_more"].format(n=len(rows) - limit, shown=limit),
+                inline=False,
+            )
 
     def preview_embed(self, with_body=False):
         """Preview embed for the tailored résumé. Defaults to with_body=False:
@@ -2226,31 +2368,34 @@ class TailorView(discord.ui.View):
             title=t["title"].format(company=self.company)[:256],
             color=_SW_PURPLE,  # Silver Wolf violet, matching the Score embed
         )
-        # Opener: the AI-varied intro (different every tailor) + the factual meta
-        # line the bot always controls (accurate metric counts + download hint).
+        # Identity line up top so every tailor reads unmistakably as Silver Wolf.
+        embed.set_author(name=t["author"])
+        # Opener: only the AI-varied intro (the factual metric/download details now
+        # live in their own scannable banner field, not crammed into the blurb).
         ov = self.blob.get("overview")
         intro = ""
         if isinstance(ov, dict):
             intro = str(ov.get(f"intro_{self.lang}") or ov.get("intro_en") or "").strip()
         if not intro:
             intro = t["preview_intro_fallback"]
-        total = self.n_total
-        if total:
-            meta = t["preview_meta_have"].format(filled=self.n_filled, total=total)
-        else:
-            meta = t["preview_meta_none"]
-        embed.description = f"{intro}\n\n{meta}"[:4096]
-
-        # Silver Wolf's read: what's strong / what she changed / what still needs
-        # you. Rendered right at the top so the user gets the overview first.
-        self._add_overview_field(embed, t)
+        embed.description = intro[:4096]
 
         if not with_body:
-            # Résumé itself is shown as the attached image — skip the text sections,
-            # keep only the review below the overview.
-            self._add_review_fields(embed, t)
+            # Résumé shown as the attached image. Field order = reading order:
+            #   1. metric CTA banner (what to do next)      — surfaced, not buried
+            #   2. Silver Wolf's read (strong / tuned / todo)
+            #   3. recruiter/ATS scan as an inline trio       — one-glance scan
+            #   4. before → after change diff                 — the proof + [ADD METRIC]
+            #   (image sits below all fields, footer closes it)
+            self._add_metric_banner(embed, t)
+            self._add_read_field(embed, t)
+            self._add_scan_fields(embed, t)
+            self._add_change_fields(embed, t)
             embed.set_footer(text=t["footer"])
             return embed
+
+        # Legacy text-body path keeps the old overview+review helpers.
+        self._add_read_field(embed, t)
 
         name = str(data.get("name") or "").strip()
         if name:
@@ -2302,28 +2447,32 @@ class TailorView(discord.ui.View):
                 inline=False,
             )
 
-        # Silver Wolf's fuller review (the /reviewresume content) folded into this
-        # same embed, below the build — impression / strengths / improvements / ATS.
-        self._add_review_fields(embed, t)
+        # Recruiter/ATS scan trio (legacy text path).
+        self._add_scan_fields(embed, t)
 
         embed.set_footer(text=t["footer"])
         return embed
 
     async def preview_render(self):
-        """Async preview: render the CURRENT (pre-metrics, no-metric) résumé to a
-        real PDF, rasterize page 1 to a PNG, and return (embed, file) with that
-        image set on the embed — so the user sees the unfinished résumé as an
-        IMAGE, never the raw text sections. If the image can't be produced (builder
-        offline / raster failed) we attach the PDF and say so — but we STILL never
-        dump the résumé text into the embed. Never raises."""
+        """Async preview: render the CURRENT résumé to a real PDF, rasterize page 1
+        to a PNG, and return (embed, file) with that image set on the embed — so
+        the user sees the résumé as an IMAGE, never the raw text sections. The
+        preview keeps the literal [ADD METRIC] placeholders on any unfilled slot so
+        the user can SEE where to drop real numbers (filled slots show the value).
+        If the image can't be produced (builder offline / raster failed) we attach
+        the PDF and say so — but we STILL never dump the résumé text into the embed.
+        Never raises."""
         png = None
         pdf = None
         try:
-            # Preview uses the no-metric version of every bullet (the "unfinished"
-            # résumé) so the image is meaningful before any metric is entered.
-            yaml_text = _blob_to_yaml(
-                self.blob, {i: _SKIP for i in self.metric_indices}
-            )
+            # keep_token=True → the preview image shows [ADD METRIC] on unfilled
+            # slots. Respects self.values so already-filled numbers appear. In
+            # no_metrics mode every slot is skipped → clean, no placeholders.
+            if self.no_metrics:
+                vals = {i: _SKIP for i in self.metric_indices}
+            else:
+                vals = self.values
+            yaml_text = _blob_to_yaml(self.blob, vals, keep_token=True)
             pdf = await asyncio.to_thread(_build_pdf_sync, yaml_text)
             if pdf:
                 png = await asyncio.to_thread(_pdf_to_png, pdf)
@@ -2600,7 +2749,7 @@ async def run_tailor(db, user, table, row_id, progress=None):
 
 # Bump when the Tailor prompt / blob schema changes so stale caches (old voice,
 # old bullet variants) are ignored and regenerated with the current prompt.
-_TAILOR_BLOB_VERSION = 25
+_TAILOR_BLOB_VERSION = 26
 
 
 def _dump_blob(blob):
