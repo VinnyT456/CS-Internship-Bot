@@ -70,11 +70,13 @@ def _build_pdf_sync(yaml_text):
     return None
 
 
-def _pdf_to_png(pdf_bytes, max_pages=1, zoom=2.0):
-    """Render the first page(s) of a PDF to a single PNG (stacked vertically)
-    for an in-embed preview. Returns PNG bytes or None. Blocking — call via
-    asyncio.to_thread. Never raises. Needs PyMuPDF (fitz); if it's missing the
-    caller just falls back to the text preview + PDF download."""
+def _pdf_to_png(pdf_bytes, max_pages=3, zoom=2.0):
+    """Render the résumé PDF's page(s) to a single PNG (stacked vertically) for an
+    in-embed preview. Defaults to up to 3 pages: a tailored résumé can spill onto
+    page 2, and the skills section usually sits at the BOTTOM — rendering only
+    page 1 would silently drop skills from the preview. Returns PNG bytes or None.
+    Blocking — call via asyncio.to_thread. Never raises. Needs PyMuPDF (fitz); if
+    it's missing the caller falls back to the text preview + PDF download."""
     if not pdf_bytes:
         return None
     try:
@@ -2768,7 +2770,7 @@ async def run_tailor(db, user, table, row_id, progress=None):
 
 # Bump when the Tailor prompt / blob schema changes so stale caches (old voice,
 # old bullet variants) are ignored and regenerated with the current prompt.
-_TAILOR_BLOB_VERSION = 28
+_TAILOR_BLOB_VERSION = 29
 
 
 def _dump_blob(blob):
@@ -2797,6 +2799,19 @@ def _load_blob(cached):
     return None
 
 
+def _has_real_skills(structured):
+    """True if the structure has a non-empty skills section (at least one category
+    with at least one real skill string). The builder's empty-filler
+    [{"category": "", "list": [""]}] does NOT count as real."""
+    for s in (structured or {}).get("skills") or []:
+        if not isinstance(s, dict):
+            continue
+        for item in s.get("list") or []:
+            if str(item).strip():
+                return True
+    return False
+
+
 async def _generate_tailor_blob(db, uid, row, progress=None):
     """Produce a tailor blob (structured resume + per-bullet {m,n} variants) for
     (uid, row): fast variant-rewrite over the stored structure, else a full-regen
@@ -2810,6 +2825,21 @@ async def _generate_tailor_blob(db, uid, row, progress=None):
                 resume_utils.parse_structured, text, None
             )
             if structured:
+                await asyncio.to_thread(
+                    resume_utils.store_structured, db, uid, structured
+                )
+    # Self-heal a MISSING SKILLS section: an old/flaky parse can store a structure
+    # with no skills, which then silently vanishes from the tailored preview even
+    # though the original résumé lists them. If skills are empty but the résumé
+    # text has them, re-parse and splice the skills back in (and persist the fix).
+    if structured and not _has_real_skills(structured):
+        text = await asyncio.to_thread(resume_utils.get_resume_text, db, uid)
+        if text:
+            reparsed = await asyncio.to_thread(
+                resume_utils.parse_structured, text, None
+            )
+            if reparsed and _has_real_skills(reparsed):
+                structured["skills"] = reparsed["skills"]
                 await asyncio.to_thread(
                     resume_utils.store_structured, db, uid, structured
                 )
