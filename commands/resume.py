@@ -54,27 +54,38 @@ async def prime_resume(db, uuid, *, force=False):
             await asyncio.to_thread(resume_utils.store_text, db, uuid, text)
             status["text"] = True
 
-    # 2. Structured resume — enables the fast bullet-only Tailor path.
-    if not force and isinstance(row.get("structured_json"), dict):
-        status["structured"] = True
-    else:
+    # Steps 2 and 3 both depend only on the text/image from step 1, not on each
+    # other — run them CONCURRENTLY so the resume is "ready" sooner.
+    have_structured = not force and isinstance(row.get("structured_json"), dict)
+    have_review = not force and isinstance(row.get("review_json"), dict)
+
+    async def _do_structured():
+        # 2. Structured resume — enables the fast bullet-only Tailor path.
+        if have_structured:
+            return True
         structured = await _retry_async(
             resume_utils.parse_structured, text, img, label="parse_structured"
         )
         if structured:
             await asyncio.to_thread(resume_utils.store_structured, db, uuid, structured)
-            status["structured"] = True
+            return True
+        return False
 
-    # 3. Precomputed review — makes /reviewresume instant.
-    if not force and isinstance(row.get("review_json"), dict):
-        status["review"] = True
-    else:
+    async def _do_review():
+        # 3. Precomputed review — makes /reviewresume instant.
+        if have_review:
+            return True
         review = await _retry_async(
             ai_commands.compute_review, text, img, label="compute_review"
         )
         if review:
             await asyncio.to_thread(resume_utils.store_review, db, uuid, review)
-            status["review"] = True
+            return True
+        return False
+
+    status["structured"], status["review"] = await asyncio.gather(
+        _do_structured(), _do_review()
+    )
 
     # 4. Pre-tailor the newest few postings so the first Tailor click is instant.
     if status["structured"] or status["text"]:
@@ -103,11 +114,14 @@ async def _pretailor_newest(db, uuid, n=3):
     except Exception:
         log.exception("pretailor: failed listing newest internships")
         return
-    for r in rows:
+    async def _one(row_id):
         try:
-            await job_ai.pretailor_job(db, uuid, "internships", r["id"])
+            await job_ai.pretailor_job(db, uuid, "internships", row_id)
         except Exception:
-            log.exception("pretailor job %s failed", r.get("id"))
+            log.exception("pretailor job %s failed", row_id)
+
+    # Pre-tailor the newest N concurrently — each is an independent AI job.
+    await asyncio.gather(*(_one(r["id"]) for r in rows))
 
 
 # Back-compat alias for the background task.
@@ -160,9 +174,8 @@ def register(bot, *, get_db, logger=None):
             await asyncio.to_thread(
                 resume_utils.process_and_store, db, uuid, pdf_bytes, file.filename
             )
-            # New resume invalidates any cached match scores and tailors.
-            await asyncio.to_thread(db.clear_score_cache, uuid)
-            await asyncio.to_thread(db.clear_tailor_cache, uuid)
+            # Cache invalidation moved off the reply path — it's done in the
+            # background prime below so the "uploaded" ack lands sooner.
         except resume_utils.ResumeError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
             return
@@ -185,6 +198,12 @@ def register(bot, *, get_db, logger=None):
         # DM-style follow up with the result so the user knows it's ready (and
         # which parts, if the AI was flaky).
         async def _prime_and_report():
+            # New resume invalidates any cached match scores and tailors — do it
+            # here (concurrently) instead of blocking the upload ack.
+            await asyncio.gather(
+                asyncio.to_thread(db.clear_score_cache, uuid),
+                asyncio.to_thread(db.clear_tailor_cache, uuid),
+            )
             status = await prime_resume(db, uuid, force=True)
             ready = all(status.values())
             if ready:

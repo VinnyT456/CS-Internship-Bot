@@ -55,7 +55,11 @@ def _render_pdf_to_png(pdf_bytes: bytes) -> bytes:
             y += p.height
 
     out = io.BytesIO()
-    stacked.save(out, format="PNG", optimize=True)
+    # Drop optimize=True (an extra exhaustive zlib pass) but keep the default
+    # compression level: level 1 is only ~10ms faster yet more than doubles the
+    # PNG size, which then costs MORE on every upload + later download. Default
+    # (~6) is the fast-enough / small-enough sweet spot.
+    stacked.save(out, format="PNG")
     for p in pages:
         p.close()
     return out.getvalue()
@@ -78,15 +82,22 @@ def process_and_store(db, user_uuid, pdf_bytes: bytes, original_filename: str) -
     image_path = f"{user_uuid}/resume.png"
 
     storage = db.supabase.storage.from_(BUCKET)
+    # Upload the PDF and the rendered PNG concurrently — they're independent
+    # network round-trips, so running them in parallel roughly halves the
+    # storage wait on the upload path.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _up(path, data, ctype):
+        storage.upload(path, data, {"content-type": ctype, "upsert": "true"})
+
     try:
-        storage.upload(
-            pdf_path, pdf_bytes,
-            {"content-type": "application/pdf", "upsert": "true"},
-        )
-        storage.upload(
-            image_path, image_bytes,
-            {"content-type": "image/png", "upsert": "true"},
-        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [
+                pool.submit(_up, pdf_path, pdf_bytes, "application/pdf"),
+                pool.submit(_up, image_path, image_bytes, "image/png"),
+            ]
+            for f in futs:
+                f.result()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Resume upload to storage failed")
         raise ResumeError("Couldn't store your resume — try again in a moment.") from exc

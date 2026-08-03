@@ -1058,59 +1058,90 @@ wording. No gamer slang inside the bullets.
 </posting>
 
 <ats_mission priority="HIGHEST">
-Your #1 goal: make each bullet PASS the ATS keyword/relevance filter so a human \
-ever reads it. Most résumés die at the parser, silently. Optimize hard:
-- Pull the EXACT hard-skill / tool / framework / technology strings from the \
-posting and use them verbatim, spelled and cased exactly like the posting \
-(e.g. "Node.js" not "NodeJS", "CI/CD" not "continuous integration"), wherever the \
-bullet TRUTHFULLY involved that thing.
-- Mirror the posting's phrasing for the same work — their words, the candidate's \
-real accomplishment.
-- Front-load the relevant technology/keyword in each bullet.
-- Where natural, expand an acronym once, e.g. "Amazon Web Services (AWS)".
-- NEVER invent or imply a skill the bullet doesn't support — a fake keyword that \
-surfaces in the interview is worse than a miss. Density from REAL content only.
+Goal: help each bullet clear the ATS keyword/relevance filter — but ONLY by \
+matching the words the candidate's REAL work already earns. The failure mode that \
+gets a candidate rejected isn't a missing keyword; it's a FAKE one that collapses \
+in the interview. Truthfulness outranks keyword density, always.
+- When a bullet TRULY involved a posting tool/skill, spell it exactly like the \
+posting ("Node.js" not "NodeJS", "CI/CD" not "continuous integration"), and \
+prefer surfacing it early. This is a re-WORDING of what's there — not an addition.
+- Mirror the posting's phrasing for the SAME work the bullet already describes.
+- HARD BAN — do NOT append a posting keyword, tool, technology, or a new clause \
+("...and managed data with SQL", "...optimizing REST APIs") to a bullet that \
+didn't already do that thing. If the original bullet doesn't contain it, it does \
+not go in. No "and X" tails, no invented scope. When unsure whether the bullet \
+supports a keyword, LEAVE IT OUT.
+- Not every bullet needs a posting keyword. A bullet whose real work simply isn't \
+what this posting is about should be left alone, not stuffed to force relevance.
+- Where natural AND already present, expand an acronym once (e.g. "Amazon Web \
+Services (AWS)").
 </ats_mission>
 
 <task>
-Rewrite each resume bullet below to target this posting and pass the ATS, using \
-Google's XYZ formula: "Accomplished [X] as measured by [Y], by doing [Z]" — lead \
-with the accomplishment [X], the metric slot [Y] as the literal placeholder \
-"[ADD METRIC]" ONLY where a number would genuinely strengthen the bullet, then \
-how [Z] (naming the real, posting-matching tools). For a genuinely qualitative \
-bullet (e.g. "Refactored the auth module to use JWT") do NOT bolt on a \
-nonsensical "as measured by [ADD METRIC]" — write it as [X] by [Z] with no metric \
-slot. Placeholders only where a metric makes real sense.
+MINIMAL-CHANGE RULE (most important): a résumé that's already good does NOT need \
+a full rewrite. Over-editing is a bug — it erases the candidate's real voice and \
+risks introducing errors. Your job is a SURGICAL pass: leave strong bullets almost \
+untouched, and spend your edits only where they actually raise the odds of an \
+interview. Touch the fewest words that move the needle.
 
-For EACH bullet, work this way (it keeps the rewrite truthful and traceable):
-1. Read what the ORIGINAL bullet actually says the candidate did — the real \
-action, tools, and outcome. That content is your only source.
-2. Match it to the posting: which of the posting's exact keyword strings \
-genuinely describe THIS bullet's real work? Use only those.
-3. Rewrite in XYZ form, mirroring the posting's wording for that same work, \
-front-loading the matched tech.
-4. VERIFY before moving on: every tool/skill/number in your rewrite must already \
-be in the original bullet (numbers stay real or become "[ADD METRIC]"). If you \
-added a posting keyword the original bullet doesn't actually support, remove it — \
-a rewrite is a rewording of real work, never a new claim.
+STEP 0 — TRIAGE each bullet before touching it. Decide which bucket it's in:
+  (A) ALREADY STRONG — leads with a real action verb, has a concrete outcome, \
+already carries the posting's key tech/keywords, AND (if it has one) a REAL number. \
+→ KEEP IT AS-IS, or change at most a word or two. Do NOT reshape it into XYZ just \
+for the template. Do NOT strip or weaken it.
+  (B) GOOD BONES, MISSING ALIGNMENT — solid work but buried tech, weak verb, or \
+the posting's exact keyword string isn't surfaced. → LIGHT touch: front-load / swap \
+in the exact keyword, strengthen the verb. Keep everything else.
+  (C) WEAK — filler ("responsible for", "helped with", "worked on"), vague, no \
+outcome, no tech. → This is where a real rewrite earns its place: reshape into \
+Google's XYZ form "Accomplished [X] as measured by [Y], by doing [Z]".
+
+NUMBERS — never downgrade a real one. If a bullet ALREADY has a real metric ("cut \
+latency 40%", "10k users"), KEEP THE REAL NUMBER exactly. NEVER replace a real \
+number with the "[ADD METRIC]" placeholder — that throws away proof the candidate \
+already earned. Only ADD an "[ADD METRIC]" slot to a bucket-C bullet that has NO \
+number and where a metric would genuinely strengthen it. A qualitative bullet \
+(e.g. "Refactored auth to JWT") gets NO metric slot at all.
+
+For every bullet you DO touch, verify: each tool/skill/number in the result is \
+already in the original (real numbers stay real; only a numberless bullet may gain \
+"[ADD METRIC]"). A posting keyword the original doesn't truthfully support must be \
+removed — a rewrite rewords real work, never invents a new claim.
+
+PRIORITIZE: if only some bullets matter for this posting, put your effort there. A \
+mostly-unchanged résumé with three sharpened bullets beats a fully-rewritten one \
+that reads like a template.
 </task>
 
 <style_rules>
-- Start every bullet with a strong past-tense action verb (Built, Led, \
-Designed, Automated, Optimized, Shipped, Reduced, Architected).
-- Lead with impact/outcome, not the task. Cut weak filler ("responsible for", \
+These apply to bullets you're IMPROVING (buckets B and C); a bucket-A bullet that \
+already reads well doesn't need to be forced to match them:
+- Strong past-tense action verb up front (Built, Led, Designed, Automated, \
+Optimized, Shipped, Reduced, Architected) — fix a weak opener, don't churn a good one.
+- Lead with impact/outcome over the task. Cut real filler ("responsible for", \
 "helped with", "worked on").
-- Weave in the posting's EXACT keyword/tech strings verbatim where truthful.
+- Surface the posting's EXACT keyword/tech strings verbatim where truthful.
 - One tight active-voice line each, no first person, professional tone.
 </style_rules>
 
 <truth_rules>
-- Reword ONLY — never invent facts, tools, employers, scope, or NUMBERS. The \
-only number-like token allowed is the literal "[ADD METRIC]".
-- NEVER swap a real tool for the posting's similar-but-different one (Flask stays \
-Flask even if the posting wants FastAPI; MySQL stays MySQL even if it wants \
-PostgreSQL). Keep the tool the candidate actually used; you may surface the true \
-shared concept ("REST APIs", "relational databases") but never rename the tech.
+- Reword ONLY — never invent facts, tools, employers, scope, or NUMBERS.
+- Real numbers are SACRED: keep every real metric the bullet already has, exactly.
+The ONLY place "[ADD METRIC]" may appear is a numberless bullet you're improving \
+where a metric would genuinely fit — never as a replacement for a real number.
+- TOOL / LANGUAGE SWAPS ARE THE #1 REJECTION RISK — banned, no exceptions. NEVER \
+rename a tool, framework, or PROGRAMMING LANGUAGE the candidate actually used to a \
+different one the posting prefers. The candidate will be asked about it and get \
+caught. Concretely: Swift stays Swift even if the posting wants Python — do NOT \
+write "Python"; Flask stays Flask even if it wants FastAPI; MySQL stays MySQL even \
+if it wants PostgreSQL; React stays React even if it wants Vue. Keep the EXACT tech \
+the candidate used. You MAY surface a true shared concept the work genuinely fits \
+("REST APIs", "relational databases", "real-time sync") — but the concrete tool/\
+language name is a hard fact you never change. If the bullet's tech simply doesn't \
+match the posting, leave the bullet alone; a mismatched-but-honest bullet beats a \
+matched lie.
+- When in doubt, change LESS. A bullet you're unsure about, leave closer to the \
+original — do not "improve" it into something the candidate can't defend.
 - Keep the SAME number of bullets, in the SAME order.
 </truth_rules>
 
@@ -1180,13 +1211,17 @@ sentences.
 PER-FIELD FEEL:
 - strong: grudging respect — "this part's genuinely solid, that's carrying you." \
 Name the real strength for THIS role, don't gush.
-- changed: her operator's-report — "here's what I tuned." IMPORTANT: you only \
-see the FINAL tailored bullets, not the originals, so you can't know exactly what \
-changed. Describe the KINDS of tailoring truthfully and generally (surfaced the \
-posting's keywords where they were true, sharpened bullets to lead with impact, \
-tightened each to one clean line, reordered toward the most role-relevant) — do \
-NOT claim a specific before→after edit you can't verify, and never invent a \
-change. Safe and general beats specific-but-fabricated.
+- changed: her operator's-report — "here's what I tuned." IMPORTANT: the edit was \
+a SURGICAL, minimal-change pass — she deliberately left the already-strong bullets \
+alone and only sharpened the ones that needed it. So frame it that way, with a bit \
+of pride in the restraint: "left the strong stuff alone, only tuned what was \
+holding you back." You only see the FINAL bullets, not the originals, so describe \
+the KINDS of light tailoring truthfully and generally (surfaced a posting keyword \
+where it was already true, fixed a weak opener, tightened a loose line) — do NOT \
+claim a big rewrite, do NOT claim a specific before→after edit you can't verify, \
+and never invent a change. If the résumé was mostly already good, SAY that \
+("honestly, most of it was already sharp — I just tightened a couple lines"). \
+Under-claiming beats over-claiming; safe-and-general beats specific-but-fabricated.
 - todo: the warm close (豆腐心) — blunt about the one thing left, but framed as \
 "do this and you're set," never "you're not good enough." She hands them the \
 last step because she wants them to clear it. If there's genuinely nothing left, \
@@ -1267,8 +1302,22 @@ non-fluffy? Flag anything that sounds inflated or hand-wavy.
 </posting>
 
 <how_to_review>
-For EACH bullet, silently run all four lenses before you write the improved \
-version — actually critique, don't just re-affirm:
+MINIMAL-CHANGE FIRST: these bullets were ALREADY tailored in a prior pass. Your \
+job is a light final polish, NOT a second rewrite. Most bullets should come back \
+identical or nearly so. Only touch a bullet where a change clearly RAISES the \
+interview odds — a genuinely weak verb, real filler, or a posting keyword the \
+bullet's real work supports but doesn't show. If a bullet already reads well, \
+return it EXACTLY as given. Do not churn good bullets for the sake of "improving" \
+them — over-editing loses the candidate's real voice and risks errors.
+
+Two hard preservation rules before anything else:
+- A bullet that already has a REAL number (e.g. "40%", "10k users") is proof the \
+candidate earned — keep the number exactly, never strip or weaken it.
+- Never APPEND a posting keyword, tool, or a new clause ("...and managed data \
+with SQL") to a bullet that didn't do that thing. No invented tails.
+
+For EACH bullet, silently run all four lenses before deciding whether it even \
+needs a change — actually critique, don't just re-affirm:
 - ATS: which of the posting's must-have keywords does this bullet's REAL work \
 support but currently omit or under-state? Pull them in with the posting's exact \
 string/casing. (Only ones the work truly supports.)
@@ -1304,8 +1353,12 @@ bullet around it.
 surface a real keyword the bullet already supports, tighten to one line, fix a \
 weak verb, mark a spot for a real-but-missing metric with "[ADD METRIC]". NEVER \
 invent a skill, tool, employer, number, or accomplishment the bullet doesn't \
-already contain, and never swap a real tool for a different one. If a bullet is \
-already strong, return it unchanged.
+already contain, and NEVER rename a real tool or programming LANGUAGE to a \
+different one the posting prefers (Swift stays Swift even if it wants Python; Flask \
+stays Flask; MySQL stays MySQL) — a swapped tool is the #1 way a candidate gets \
+caught and rejected. Do NOT DELETE a real tool/language either just because it's \
+off-posting — it's still a real skill; keep it. If a bullet is already strong, \
+return it unchanged.
 - Every fix must keep the bullet professional recruiter-grade English — no slang, \
 no first person, one tight line.
 </rules>
@@ -1414,51 +1467,6 @@ def _generate_review(posting_ctx, tailored_bullets):
     return data if isinstance(data, dict) else None
 
 
-def _generate_change_notes(posting_ctx, before_after):
-    """For each (before, after) bullet pair, a SHORT bilingual reason the rewrite
-    is stronger for this posting (surfaced a keyword, led with impact, added the
-    XYZ metric slot, etc.). One FAST call. Returns a list of {en, zh} dicts aligned
-    to before_after; '' for anything dropped. Never raises."""
-    pairs = [(str(b or "").strip(), str(a or "").strip()) for b, a in before_after]
-    if not pairs:
-        return []
-    numbered = "\n".join(
-        f"{i + 1}. BEFORE: {b}\n   AFTER: {a}" for i, (b, a) in enumerate(pairs)
-    )
-    prompt = (
-        "You are a résumé coach. For EACH numbered bullet, give ONE short reason "
-        "(max ~15 words) why the AFTER version is stronger FOR THIS POSTING — name "
-        "the concrete change: surfaced a posting keyword, led with impact/outcome, "
-        "reshaped into Google's XYZ form (accomplished X, measured by [metric], by "
-        "doing Z), tightened wording, added a metric slot to fill, etc. Plain, no "
-        "fluff. Truthful — describe only what actually changed between BEFORE and "
-        "AFTER.\n\n"
-        f"<posting>\n{posting_ctx}\n</posting>\n\n"
-        f"<bullets>\n{numbered}\n</bullets>\n\n"
-        "Return ONLY a JSON array, one object per bullet IN ORDER, each with a "
-        'natural-English "en" and native Simplified-Chinese "zh" reason:\n'
-        '[{"en": "...", "zh": "..."}, ...]'
-    )
-    try:
-        data = gemma_client.ask_json_text(prompt, 1600, chain=gemma_client.FAST_CHAIN)
-    except Exception:
-        log.exception("Change-notes generation failed; skipping why notes")
-        return [{"en": "", "zh": ""} for _ in pairs]
-    if isinstance(data, dict):
-        data = next((v for v in data.values() if isinstance(v, list)), None)
-    if not isinstance(data, list):
-        return [{"en": "", "zh": ""} for _ in pairs]
-    out = []
-    for x in data:
-        if isinstance(x, dict):
-            out.append({"en": str(x.get("en", "")).strip(),
-                        "zh": str(x.get("zh", "")).strip()})
-        else:
-            out.append({"en": str(x).strip(), "zh": ""})
-    out += [{"en": "", "zh": ""}] * (len(pairs) - len(out))
-    return out[: len(pairs)]
-
-
 def _review_and_refine(posting_ctx, metric_bullets):
     """Run the tailored bullets past the multi-actor review panel and return the
     refined list (same length/order). One FAST-tier call role-plays all four
@@ -1487,7 +1495,12 @@ def _review_and_refine(posting_ctx, metric_bullets):
     for i, original in enumerate(metric_bullets):
         cand = (parsed[i] if i < len(parsed) else "") or ""
         cand = cand.strip()
-        out.append(cand if _review_acceptable(cand, original) else original)
+        if _review_acceptable(cand, original):
+            # Deterministic guard: drop the panel's version too if it swapped or
+            # invented a technology the pre-panel bullet didn't have.
+            out.append(_reject_tech_fabrication(original, cand))
+        else:
+            out.append(original)
     # Whole-résumé coherence safety net: no two bullets should open with the same
     # action verb (the model is told this too, but code guarantees it).
     return _dedupe_opening_verbs(out)
@@ -1743,10 +1756,61 @@ def _rewrite_chunk(posting_ctx, chunk):
     prompt = _BULLET_REWRITE_PROMPT.format(posting=posting_ctx, bullets=numbered)
     text = gemma_client.ask_text(prompt, chain=gemma_client.FAST_CHAIN)
     parsed = _parse_numbered(text, len(chunk))
-    return [
-        parsed[i] if i < len(parsed) and parsed[i] else original
-        for i, original in enumerate(chunk)
-    ]
+    out = []
+    for i, original in enumerate(chunk):
+        rw = parsed[i] if i < len(parsed) and parsed[i] else original
+        # Deterministic safety net: if the model swapped/invented a technology to
+        # match the posting, discard the rewrite and keep the original bullet.
+        out.append(_reject_tech_fabrication(original, rw))
+    return out
+
+
+# Curated tech / language / framework tokens. A DETERMINISTIC guard against the
+# model's #1 failure mode: swapping or fabricating a technology to match the
+# posting (e.g. Swift→Python) — which gets the candidate caught in the interview.
+# If a rewrite introduces any of these that the ORIGINAL bullet didn't contain,
+# the rewrite is a fabrication and we discard it, keeping the original bullet.
+# Multi-word / punctuated names first so they match before their bare stems.
+_TECH_TOKENS = (
+    "node.js", "next.js", "vue.js", "react native", "objective-c", "c++", "c#",
+    "ci/cd", "rest api", "graphql", "postgresql", "mysql", "mongodb", "sqlite",
+    "redis", "dynamodb", "swiftui", "jetpack compose", "kotlin", "swift",
+    "python", "javascript", "typescript", "java", "golang", "rust", "ruby",
+    "php", "scala", "flask", "django", "fastapi", "express", "spring", "rails",
+    "react", "angular", "svelte", "flutter", "tensorflow", "pytorch", "keras",
+    "pandas", "numpy", "aws", "gcp", "azure", "docker", "kubernetes", "terraform",
+    "supabase", "firebase", "postgres", "tailwind", "graphql",
+)
+
+
+def _tech_set(text):
+    """The curated tech tokens present in `text` (lowercased, word-ish match)."""
+    low = (text or "").lower()
+    found = set()
+    for tok in _TECH_TOKENS:
+        # Word-boundary-ish: token surrounded by non-alphanumerics (or ends).
+        if re.search(r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z0-9])", low):
+            found.add(tok)
+    return found
+
+
+def _reject_tech_fabrication(original, rewritten):
+    """Return the safe bullet: if the rewrite introduced any curated tech token
+    the original didn't have (a swap or invented tool), it's a fabrication that
+    would sink the candidate in the interview — discard it and keep the ORIGINAL.
+    Otherwise the rewrite is clean (it may drop or reword, never invent tech)."""
+    if not rewritten or not rewritten.strip():
+        return original
+    added = _tech_set(rewritten) - _tech_set(original)
+    # "postgres"/"postgresql" and "rest api" overlaps are handled by exact tokens;
+    # a genuinely new tech name in `added` means the rewrite invented/swapped it.
+    if added:
+        log.info(
+            "Tailor: rejecting rewrite (fabricated tech %s) — keeping original",
+            sorted(added),
+        )
+        return original
+    return rewritten
 
 
 def _strip_metric_phrase(text):
@@ -1845,22 +1909,14 @@ async def _tailor_build(structured, row, progress=None):
     if progress:
         await progress(len(chunks) + 1, total)
 
-    # Before → after pairs (original bullet vs the tailored metric version), for
-    # the per-bullet "what changed & why" notes shown in the preview embed.
-    before_after = [
-        (texts[i] if i < len(texts) else "", m)
-        for i, m in enumerate(metric_bullets)
-    ]
-
     # One cheap batched pass for the clean no-metric variants, plus Silver Wolf's
-    # overview, her fuller review, AND the per-bullet change notes — all run
-    # concurrently so they add no extra wall-clock. Everything renders in the one
-    # preview embed.
-    nometrics, overview, review, changes = await asyncio.gather(
+    # overview and her fuller review — run concurrently so they add no extra
+    # wall-clock. (The per-bullet before→after "change notes" call was dropped: the
+    # diff is no longer shown in the embed, so generating it was wasted latency.)
+    nometrics, overview, review = await asyncio.gather(
         asyncio.to_thread(_polish_nometrics, posting_ctx, metric_bullets),
         asyncio.to_thread(_generate_overview, posting_ctx, metric_bullets),
         asyncio.to_thread(_generate_review, posting_ctx, metric_bullets),
-        asyncio.to_thread(_generate_change_notes, posting_ctx, before_after),
     )
     if progress:
         await progress(total, total)
@@ -1870,9 +1926,6 @@ async def _tailor_build(structured, row, progress=None):
             "loc": list(loc),
             "m": m,
             "n": nometrics[i] if i < len(nometrics) else _strip_metric_phrase(m),
-            # Original bullet + why-this-changed note, for the before→after display.
-            "before": texts[i] if i < len(texts) else "",
-            "why": changes[i] if i < len(changes) else {"en": "", "zh": ""},
         }
         for i, (loc, m) in enumerate(zip(locators, metric_bullets))
     ]
@@ -1908,16 +1961,25 @@ def _blob_to_yaml(blob, values=None, keep_token=False):
     values = values or {}
     for idx, b in enumerate(blob.get("bullets") or []):
         sec, i, j = b["loc"]
+        m = b.get("m") or ""
+        has_slot = _METRIC_TOKEN in m
         val = str(values.get(idx, "") or "").strip()
-        if val and val != _SKIP:
-            text = (b.get("m") or b.get("n") or "").replace(_METRIC_TOKEN, val)
-        elif keep_token and val != _SKIP and _METRIC_TOKEN in (b.get("m") or ""):
+        if not has_slot:
+            # No [ADD METRIC] placeholder → this bullet either already has a REAL
+            # number or is qualitative. Keep the metric version verbatim: NEVER
+            # strip it to the no-metric variant (that would delete a real number
+            # the candidate earned). Nothing to fill here.
+            text = m or b.get("n") or ""
+        elif val and val != _SKIP:
+            # Slot + a value the user typed → drop the number in.
+            text = (m or b.get("n") or "").replace(_METRIC_TOKEN, val)
+        elif keep_token and val != _SKIP:
             # Preview: blank (not skipped) slot → show the metric version WITH the
             # [ADD METRIC] placeholder intact so the user sees where numbers go.
-            text = b.get("m") or b.get("n") or ""
+            text = m or b.get("n") or ""
         else:
-            # Blank / skipped → the clean no-metric version.
-            text = b.get("n") or _strip_metric_phrase(b.get("m", ""))
+            # Slot left blank / skipped → the clean no-metric version.
+            text = b.get("n") or _strip_metric_phrase(m)
         # Safety: outside preview mode a placeholder must NEVER reach a
         # recruiter/ATS. If the no-metric fallback somehow still carries the
         # token, strip it clean.
@@ -2132,11 +2194,6 @@ _TAILOR_TEXT = {
         "mb_todo": ("**{left}** slot(s) left. Real numbers hit harder — tap **📊 "
                     "Metrics** to load them, or leave blank for the clean version."),
         "mb_done": "All loaded. Clean run — go download it.",
-        "ch_name": "🔬 What I changed — before → after",
-        "ch_intro": ("Your original → my rewrite (XYZ form, **[ADD METRIC]** = drop "
-                     "a real number here). Showing the first few."),
-        "ch_before": "Before", "ch_after": "After", "ch_why": "Why",
-        "ch_bullet": "Bullet {n}", "ch_more": "…+{n} more bullets (showing first {shown})",
         "status_ready": ("Your **1-page** résumé's patched and ready — clean run, "
                          "cleared every gate. Take it and go get that interview; "
                          "I did my part. Preview below, click to download.\n"),
@@ -2186,11 +2243,6 @@ _TAILOR_TEXT = {
         "mb_todo": ("还剩 **{left}** 个槽位。真实数字更有杀伤力——点 **📊 数据** 填上，"
                     "或者留空用干净版本。"),
         "mb_done": "全填好了。干净通关——下载走人。",
-        "ch_name": "🔬 我改了啥 — 前 → 后",
-        "ch_intro": ("你的原文 → 我的改写（XYZ 格式，**[ADD METRIC]** = 这里填真实数字）。"
-                     "只显示前几条。"),
-        "ch_before": "改前", "ch_after": "改后", "ch_why": "原因",
-        "ch_bullet": "要点 {n}", "ch_more": "…还有 {n} 条（只显示前 {shown} 条）",
         "status_ready": "你的**一页**简历补丁打好了——干净通关，每道门都过了。拿去把面试拿下，我这边做完了。下方预览，点击下载。\n",
         "status_no_metrics": "*没填数据直接出——每条要点用的都是干净的无数字版本。照样能打，别慌。*",
         "status_real": "*只用你的真实数据，我不刷假装备。*",
@@ -2314,39 +2366,6 @@ class TailorView(discord.ui.View):
         if rendered == 2:
             embed.add_field(name="​", value="​", inline=True)
 
-    def _add_change_fields(self, embed, t, limit=3):
-        """The tailoring effect per bullet — original → rewrite (XYZ form with the
-        [ADD METRIC] slot) → why — compact: the BEFORE is a muted blockquote, the
-        AFTER is emphasised (it's the thing they keep), the WHY is a dim one-liner.
-        This is what makes the metric request visible. No-op on older caches."""
-        bullets = self.blob.get("bullets") or []
-        rows = [
-            b for b in bullets
-            if isinstance(b, dict) and str(b.get("before") or "").strip()
-        ]
-        if not rows:
-            return
-        lang = self.lang
-        embed.add_field(name=t["ch_name"], value=t["ch_intro"], inline=False)
-        for i, b in enumerate(rows[:limit]):
-            before = str(b.get("before") or "").strip()
-            after = str(b.get("m") or b.get("n") or "").strip()
-            why = b.get("why") or {}
-            why_txt = str(why.get(lang) or why.get("en") or "").strip()
-            # Blockquoted before (muted) → arrow → bold after → dim why.
-            val = f"> {before}\n**→ {after}**"
-            if why_txt:
-                val += f"\n*{why_txt}*"
-            embed.add_field(
-                name=t["ch_bullet"].format(n=i + 1), value=val[:1024], inline=False
-            )
-        if len(rows) > limit:
-            embed.add_field(
-                name="​",
-                value=t["ch_more"].format(n=len(rows) - limit, shown=limit),
-                inline=False,
-            )
-
     def preview_embed(self, with_body=False):
         """Preview embed for the tailored résumé. Defaults to with_body=False:
         the résumé is shown as the rendered IMAGE (or attached PDF), never as raw
@@ -2385,12 +2404,12 @@ class TailorView(discord.ui.View):
             #   1. metric CTA banner (what to do next)      — surfaced, not buried
             #   2. Silver Wolf's read (strong / tuned / todo)
             #   3. recruiter/ATS scan as an inline trio       — one-glance scan
-            #   4. before → after change diff                 — the proof + [ADD METRIC]
             #   (image sits below all fields, footer closes it)
+            # The per-bullet before→after diff is intentionally NOT shown here —
+            # the résumé image is the source of truth; a change log just adds noise.
             self._add_metric_banner(embed, t)
             self._add_read_field(embed, t)
             self._add_scan_fields(embed, t)
-            self._add_change_fields(embed, t)
             embed.set_footer(text=t["footer"])
             return embed
 
@@ -2749,7 +2768,7 @@ async def run_tailor(db, user, table, row_id, progress=None):
 
 # Bump when the Tailor prompt / blob schema changes so stale caches (old voice,
 # old bullet variants) are ignored and regenerated with the current prompt.
-_TAILOR_BLOB_VERSION = 26
+_TAILOR_BLOB_VERSION = 28
 
 
 def _dump_blob(blob):
