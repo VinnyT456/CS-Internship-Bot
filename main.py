@@ -1671,6 +1671,19 @@ async def on_ready():
                 logger.exception("Failed LeetCode startup catch-up")
         asyncio.create_task(_leetcode_catch_up())
 
+    # Auto-announce: on startup (i.e. after a deploy), post the pending changelog
+    # ONCE. Gated by a changelog hash in sent_announcements, so a plain restart
+    # never re-posts, and shipping an edited changelog announces it exactly once.
+    if ANNOUNCE_CHANNEL_ID:
+        async def _auto_announce():
+            try:
+                channel = await get_cached_channel("announce", ANNOUNCE_CHANNEL_ID)
+                if await announce_cmd.post_pending_if_new(bot, channel, get_db):
+                    logger.info("📢 Posted feature announcement (startup)")
+            except Exception:
+                logger.exception("Failed startup auto-announce")
+        asyncio.create_task(_auto_announce())
+
     # Warm the Gemma client so the first AI command isn't cold.
     try:
         from commands import gemma_client

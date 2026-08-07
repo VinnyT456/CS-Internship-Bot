@@ -175,6 +175,40 @@ PENDING_CHANGELOG = [
 ]
 
 
+def changelog_version(features=None):
+    """A stable content hash of the changelog. Editing the changelog changes the
+    hash, so the startup auto-announce posts a fresh announcement exactly once per
+    distinct changelog and never re-posts the same one on restart."""
+    import hashlib
+    import json
+
+    features = PENDING_CHANGELOG if features is None else features
+    blob = json.dumps(features, sort_keys=True, ensure_ascii=False)
+    return "cl_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+async def post_pending_if_new(bot, channel, get_db):
+    """Auto-post the pending changelog ONCE, gated on the sent_announcements table
+    by changelog hash. Safe to call on every startup: it posts only when the
+    current changelog hasn't been announced yet, so a restart never double-posts,
+    and editing the changelog announces the new one exactly once. Returns the sent
+    message, or None if nothing was posted."""
+    if not PENDING_CHANGELOG:
+        return None
+    version = changelog_version()
+    db = get_db() if get_db else None
+    if db is not None:
+        if await asyncio.to_thread(db.was_announcement_sent, version):
+            logger.info("announce: changelog %s already announced, skipping", version)
+            return None
+    msg = await post_update(bot, channel, PENDING_CHANGELOG, get_db)
+    if msg and db is not None:
+        await asyncio.to_thread(
+            db.mark_announcement_sent, version, getattr(msg, "id", None)
+        )
+    return msg
+
+
 def register(bot, *, announce_channel_id, get_db=None, logger=None):
     """Register /announce — admin-only trigger that posts the PENDING_CHANGELOG as
     a Silver Wolf patch-notes announcement. Restricted to members with Manage

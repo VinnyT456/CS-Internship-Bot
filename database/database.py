@@ -324,6 +324,41 @@ class SupabaseDatabase:
             self.logger.exception("Failed recording daily post")
             return False
 
+    def was_announcement_sent(self, version):
+        """True if the announcement for this changelog version was already posted —
+        the gate that stops the startup auto-announce from re-posting on every
+        restart. `version` is a content hash of the changelog."""
+        try:
+            data = (
+                self.supabase.table("sent_announcements")
+                .select("id")
+                .eq("version", version)
+                .limit(1)
+                .execute()
+                .data
+            )
+            return bool(data)
+        except Exception:
+            self.logger.exception("Failed checking announcement gate")
+            # On error, prefer NOT posting over spamming a duplicate announcement.
+            return True
+
+    def mark_announcement_sent(self, version, message_id=None):
+        """Record that the announcement for `version` was posted. Idempotent on
+        version so a race can't create two rows / two posts for one changelog."""
+        try:
+            self.supabase.table("sent_announcements").upsert(
+                {
+                    "version": version,
+                    "message_id": int(message_id) if message_id else None,
+                },
+                on_conflict="version",
+            ).execute()
+            return True
+        except Exception:
+            self.logger.exception("Failed recording announcement send")
+            return False
+
     def get_subscriptions(self, user_uuid):
         try:
             return (

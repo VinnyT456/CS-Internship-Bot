@@ -211,3 +211,17 @@ CREATE TABLE IF NOT EXISTS public.leetcode_daily_posts (
 );
 
 ALTER TABLE IF EXISTS public.leetcode_daily_posts DISABLE ROW LEVEL SECURITY;
+-- Sent-log for feature announcements. The bot auto-posts the pending changelog
+-- once on startup; this table keys on a version tag (a hash of the changelog) so
+-- a restart never re-posts the same announcement, and editing the changelog (new
+-- hash) posts a fresh one exactly once.
+CREATE TABLE IF NOT EXISTS public.sent_announcements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    version TEXT NOT NULL,           -- hash of the changelog content
+    message_id BIGINT,               -- the posted Discord message (audit)
+    sent_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (version)
+);
+
+ALTER TABLE IF EXISTS public.sent_announcements DISABLE ROW LEVEL SECURITY;
