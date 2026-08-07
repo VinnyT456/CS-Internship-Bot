@@ -18,17 +18,20 @@ from fastapi import FastAPI
 import details
 from database.database import SupabaseDatabase
 from internships.jobright_internships import JobrightInternships
+from internships.jobright_minisite_internships import JobrightMinisiteInternships
 from internships.simplify_internships import SimplifyInternships
 from new_grads.jobright_new_grad import JobrightNewGrad
 from new_grads.simplify_new_grad import SimplifyNewGrad
 from commands import (
     ai_commands as ai_cmd,
+    announce as announce_cmd,
     clearinternships as clearinternships_cmd,
     commands_board,
     help_command as help_cmd,
     job_ai,
     lang_view,
     latest as latest_cmd,
+    leetcode_cmd,
     profile as profile_cmd,
     refreshembeds as refreshembeds_cmd,
     resume as resume_cmd,
@@ -50,6 +53,14 @@ NEW_GRADS_CHANNEL_ID = int(os.getenv("NEW_GRADS_CHANNEL_ID"))
 # Optional: channel for the persistent command-guide message.
 _COMMANDS_CHANNEL_RAW = os.getenv("COMMANDS_CHANNEL_ID")
 COMMANDS_CHANNEL_ID = int(_COMMANDS_CHANNEL_RAW) if _COMMANDS_CHANNEL_RAW else None
+# LeetCode grind channel — daily problem + Silver Wolf explainer (optional).
+_LEETCODE_CHANNEL_RAW = os.getenv("LEETCODE_CHANNEL_ID")
+LEETCODE_CHANNEL_ID = int(_LEETCODE_CHANNEL_RAW) if _LEETCODE_CHANNEL_RAW else None
+# Announcement channel — Silver Wolf posts patch notes when new features ship.
+_ANNOUNCE_CHANNEL_RAW = os.getenv("ANNOUNCE_CHANNEL_ID", "1535045565598011472")
+ANNOUNCE_CHANNEL_ID = int(_ANNOUNCE_CHANNEL_RAW) if _ANNOUNCE_CHANNEL_RAW else None
+# Hour (UTC) to post the daily LeetCode problem. Default 14:00 UTC ≈ 9am ET.
+LEETCODE_POST_HOUR_UTC = int(os.getenv("LEETCODE_POST_HOUR_UTC", "14"))
 
 CATEGORY_COLORS = {
     "Software Engineering": discord.Color.blue(),
@@ -61,7 +72,20 @@ CATEGORY_COLORS = {
 }
 
 MESSAGE_SEND_DELAY_SECONDS = 1.2
-MAX_POSTS_PER_CYCLE = 400
+# Per-cycle post cap. Kept modest for the 512 MB Render box — each posted row is
+# enriched (detail scrape + company_info join) and held in RAM for the batch, so
+# a big cap spikes memory. 100/cycle × the 15-min loop = ~400/hr, which keeps up
+# with real posting volume; any backlog drains over the next cycles. Override via
+# env if you move to a bigger instance.
+MAX_POSTS_PER_CYCLE = int(os.getenv("MAX_POSTS_PER_CYCLE", "100"))
+
+# Smart (résumé-match) alerts: DM a smart subscriber a new role only if its AI
+# match score clears this bar. Bounded per scrape cycle so cost stays predictable
+# — overflow (subscriber, job) pairs are scored on a later cycle.
+SMART_MATCH_THRESHOLD = int(os.getenv("SMART_MATCH_THRESHOLD", "75"))
+SMART_SCORES_PER_CYCLE = int(os.getenv("SMART_SCORES_PER_CYCLE", "150"))
+# Module-level counter reset at the start of each scrape cycle.
+_smart_scores_this_cycle = 0
 
 ENRICH_WORKERS = int(os.getenv("ENRICH_WORKERS", "4"))
 REFRESH_CONCURRENCY = int(os.getenv("REFRESH_CONCURRENCY", "5"))
@@ -159,7 +183,11 @@ def _run_scraper(scraper):
         logger.exception("Scraper %s failed", scraper.__class__.__name__)
 
 
-INTERNSHIP_SCRAPERS = (JobrightInternships, SimplifyInternships)
+INTERNSHIP_SCRAPERS = (
+    JobrightInternships,
+    JobrightMinisiteInternships,
+    SimplifyInternships,
+)
 NEW_GRAD_SCRAPERS = (JobrightNewGrad, SimplifyNewGrad)
 
 
@@ -171,12 +199,14 @@ def _scrape_all(scraper_classes):
 
 def fetch_new_internships():
     _scrape_all(INTERNSHIP_SCRAPERS)
-    return get_db().get_unsent_internships("internships") or []
+    # Only fetch what this cycle can post — a backlog otherwise loads every
+    # unsent row + its company_info join into RAM at once and OOMs the 512 MB box.
+    return get_db().get_unsent_internships("internships", limit=MAX_POSTS_PER_CYCLE) or []
 
 
 def fetch_new_grads():
     _scrape_all(NEW_GRAD_SCRAPERS)
-    return get_db().get_unsent_internships("new_grads") or []
+    return get_db().get_unsent_internships("new_grads", limit=MAX_POSTS_PER_CYCLE) or []
 
 
 def enrich_rows(rows, table):
@@ -231,6 +261,10 @@ async def cache_channels():
     await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
     if COMMANDS_CHANNEL_ID:
         await get_cached_channel("commands", COMMANDS_CHANNEL_ID)
+    if LEETCODE_CHANNEL_ID:
+        await get_cached_channel("leetcode", LEETCODE_CHANNEL_ID)
+    if ANNOUNCE_CHANNEL_ID:
+        await get_cached_channel("announce", ANNOUNCE_CHANNEL_ID)
 
 
 def normalize_company_info(company_info):
@@ -776,20 +810,11 @@ async def _run_job_ai(interaction, action, table, row_id):
             return
 
     if action == "score":
-        embed, file, view, error = await job_ai.run_score(
-            get_db(), interaction.user, table, row_id
+        # Score is a single ~10s model call — the shared helper cycles a live
+        # status so it doesn't look frozen, then delivers the result in place.
+        await job_ai.run_score_with_status(
+            get_db(), interaction.user, table, row_id, interaction
         )
-        if error:
-            await interaction.followup.send(error, ephemeral=True)
-            return
-        kwargs = {"ephemeral": True}
-        if embed is not None:
-            kwargs["embed"] = embed
-        if file is not None:
-            kwargs["file"] = file
-        if view is not None:
-            kwargs["view"] = view
-        await interaction.followup.send(**kwargs)
         return
 
     # Tailor: show a live progress bar, then DM the result and clear the bar.
@@ -882,7 +907,89 @@ async def notify_subscribers(internship, table, kind):
             logger.exception("Failed DMing subscriber %s", sub.get("discord_id"))
 
 
+async def notify_smart_subscribers(internship, table):
+    """DM smart (résumé-match) subscribers this new job IF it scores >= the
+    threshold against their résumé. Bounded per cycle by SMART_SCORES_PER_CYCLE so
+    cost stays predictable; deduped via smart_alerts_sent so a role is never DM'd
+    twice. Best-effort — a blocked DM / missing résumé / score failure is skipped."""
+    global _smart_scores_this_cycle
+    if internship.get("is_closed"):
+        return
+    db = get_db()
+    subs = await asyncio.to_thread(db.get_smart_subscribers)
+    if not subs:
+        return
+
+    job_id = internship.get("id")
+    for sub in subs:
+        if _smart_scores_this_cycle >= SMART_SCORES_PER_CYCLE:
+            logger.info(
+                "Smart-alert cap (%d) hit this cycle; remaining pairs deferred",
+                SMART_SCORES_PER_CYCLE,
+            )
+            return
+        uid = sub.get("user_id")
+        if not uid:
+            continue
+        # Optional category narrowing: a smart sub may still scope to a category.
+        cat = sub.get("category")
+        if cat and cat != (internship.get("job_type") or ""):
+            continue
+        # Dedup: already alerted this (user, job)? skip without scoring.
+        if await asyncio.to_thread(db.was_smart_alert_sent, uid, table, job_id):
+            continue
+
+        # Score it (this caches per user+job). run_score needs a user-ish object.
+        try:
+            user = await bot.fetch_user(int(sub["discord_id"]))
+        except (discord.NotFound, discord.HTTPException):
+            continue
+        _smart_scores_this_cycle += 1
+        try:
+            embed, file, view, error = await job_ai.run_score(
+                db, user, table, job_id
+            )
+        except Exception:
+            logger.exception("Smart-alert scoring failed for %s", uid)
+            continue
+        if error:
+            continue  # e.g. NEED_RESUME — silently skip until they upload one.
+
+        # Read the cached number to gate the DM.
+        cached = await asyncio.to_thread(db.get_cached_score, uid, table, job_id)
+        score = (cached or {}).get("score") if isinstance(cached, dict) else None
+        if not isinstance(score, int) or score < SMART_MATCH_THRESHOLD:
+            # Not a strong fit — record nothing, so a later re-score could still
+            # alert if the résumé improves. (Dedup only fires on an actual send.)
+            continue
+
+        try:
+            kwargs = {
+                "content": (
+                    f"🎯 **Strong match ({score}/100)** for your smart alert — "
+                    "don't let this one slip:"
+                ),
+            }
+            if embed is not None:
+                kwargs["embed"] = embed
+            if file is not None:
+                kwargs["file"] = file
+            if view is not None:
+                kwargs["view"] = view
+            await user.send(**kwargs)
+            await asyncio.to_thread(
+                db.mark_smart_alert_sent, uid, table, job_id, score
+            )
+            await asyncio.sleep(0.5)
+        except (discord.Forbidden, discord.NotFound):
+            continue
+        except Exception:
+            logger.exception("Failed DMing smart subscriber %s", uid)
+
+
 async def _post_batch(rows, channel, kind, table):
+    global _smart_scores_this_cycle
+    _smart_scores_this_cycle = 0  # reset the smart-alert scoring budget per batch
     logger.info("Found %s unsent %s", len(rows), kind)
 
     if len(rows) > MAX_POSTS_PER_CYCLE:
@@ -911,8 +1018,10 @@ async def _post_batch(rows, channel, kind, table):
                 mark_internship_as_sent, internship["id"], table
             )
 
-            # Best-effort alert DMs to matching subscribers.
+            # Best-effort alert DMs to matching subscribers (keyword/category).
             await notify_subscribers(internship, table, kind)
+            # Smart résumé-match alerts (AI-scored, threshold-gated, cost-capped).
+            await notify_smart_subscribers(internship, table)
 
             await asyncio.sleep(MESSAGE_SEND_DELAY_SECONDS)
 
@@ -1110,6 +1219,28 @@ async def before_closed_check():
     # Offset from both scrape loops so the three don't run at once on the small
     # instance.
     await asyncio.sleep(300)
+
+
+# --- LeetCode grind channel: one post per day at a fixed UTC hour -------------
+from datetime import time as _dtime
+
+
+@tasks.loop(time=_dtime(hour=LEETCODE_POST_HOUR_UTC, minute=0, tzinfo=timezone.utc))
+async def post_leetcode_daily():
+    if not LEETCODE_CHANNEL_ID:
+        return
+    try:
+        channel = await get_cached_channel("leetcode", LEETCODE_CHANNEL_ID)
+        msg = await leetcode_cmd.post_daily_if_missing(bot, channel, get_db)
+        if msg:
+            logger.info("📓 Posted LeetCode daily")
+    except Exception:
+        logger.exception("❌ Failed posting LeetCode daily")
+
+
+@post_leetcode_daily.before_loop
+async def before_leetcode_daily():
+    await bot.wait_until_ready()
 
 
 @tasks.loop(minutes=15)
@@ -1384,6 +1515,10 @@ resume_cmd.register(bot, get_db=get_db, logger=logger)
 ai_cmd.register(bot, get_db=get_db, logger=logger)
 profile_cmd.register(bot, get_db=get_db, logger=logger)
 subscribe_cmd.register(bot, get_db=get_db, logger=logger)
+leetcode_cmd.register(bot, get_db=get_db, logger=logger)
+announce_cmd.register(
+    bot, announce_channel_id=ANNOUNCE_CHANNEL_ID, get_db=get_db, logger=logger
+)
 from commands import test_persona as _test_persona_cmd
 _test_persona_cmd.register(bot, logger=logger)
 
@@ -1403,6 +1538,27 @@ async def on_interaction(interaction):
             await commands_board.handle_board_lang(bot, interaction)
         except Exception:
             logger.exception("Command board lang toggle failed")
+        return
+
+    # LeetCode 'Reveal Solution' — its own persistent button. Generating the
+    # walkthrough hits Gemma (seconds), so defer first, then send ephemerally.
+    if custom_id.startswith("leet:reveal:"):
+        if interaction.id in _HANDLED_INTERACTIONS:
+            return
+        _HANDLED_INTERACTIONS.add(interaction.id)
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.NotFound:
+            return
+        except discord.HTTPException as e:
+            if getattr(e, "code", None) == 40060:
+                return
+            logger.exception("Failed defer for leet reveal button")
+            return
+        try:
+            await leetcode_cmd.handle_reveal(interaction)
+        except Exception:
+            logger.exception("LeetCode reveal handler failed")
         return
 
     if not custom_id.startswith("jobsec:"):
@@ -1437,6 +1593,26 @@ async def on_interaction(interaction):
         await handle_section_button(interaction)
     except Exception:
         logger.exception("Section button handler failed")
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if not LEETCODE_CHANNEL_ID or payload.channel_id != LEETCODE_CHANNEL_ID:
+        return
+    try:
+        await leetcode_cmd.handle_solve_react(bot, payload, get_db, added=True)
+    except Exception:
+        logger.exception("LeetCode solve-react (add) failed")
+
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if not LEETCODE_CHANNEL_ID or payload.channel_id != LEETCODE_CHANNEL_ID:
+        return
+    try:
+        await leetcode_cmd.handle_solve_react(bot, payload, get_db, added=False)
+    except Exception:
+        logger.exception("LeetCode solve-react (remove) failed")
 
 
 @bot.event
@@ -1478,6 +1654,22 @@ async def on_ready():
 
     if not check_closed_status.is_running():
         check_closed_status.start()
+
+    if LEETCODE_CHANNEL_ID and not post_leetcode_daily.is_running():
+        post_leetcode_daily.start()
+
+    # Startup catch-up: if today's daily isn't in the channel yet (e.g. the bot
+    # was down at the scheduled hour, or a deploy landed after it), post it now.
+    # Idempotent — skips if already posted, so a mid-day restart won't double up.
+    if LEETCODE_CHANNEL_ID:
+        async def _leetcode_catch_up():
+            try:
+                channel = await get_cached_channel("leetcode", LEETCODE_CHANNEL_ID)
+                if await leetcode_cmd.post_daily_if_missing(bot, channel, get_db):
+                    logger.info("📓 Posted LeetCode daily (startup catch-up)")
+            except Exception:
+                logger.exception("Failed LeetCode startup catch-up")
+        asyncio.create_task(_leetcode_catch_up())
 
     # Warm the Gemma client so the first AI command isn't cold.
     try:

@@ -7,7 +7,9 @@ proportionally, color-graded red→amber→green by score.
 import io
 import math
 
-from PIL import Image, ImageDraw, ImageFont
+# PIL is imported lazily inside the render helpers (not at module top) so that
+# importing this module — which job_ai does at boot — doesn't drag Pillow (~15 MB)
+# into the always-on process. It only loads the first time a score wheel renders.
 
 
 def _color_for(score):
@@ -25,6 +27,8 @@ def _color_for(score):
 
 
 def _load_font(size):
+    from PIL import ImageFont
+
     for path in (
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
@@ -40,6 +44,8 @@ def _load_font(size):
 
 def render(score, size=400, label="MATCH"):
     """PNG bytes of a donut gauge for `score` (0-100). Transparent background."""
+    from PIL import Image, ImageDraw
+
     score = max(0, min(100, int(round(score))))
     scale = 4  # supersample for smooth arc, downscaled at the end
     S = size * scale

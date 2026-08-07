@@ -39,7 +39,7 @@ class SupabaseDatabase:
 
     # Bump whenever the Score prompt / output schema changes so stale rows
     # (old voice, missing bilingual fields) are ignored and regenerated.
-    SCORE_CACHE_VERSION = 49
+    SCORE_CACHE_VERSION = 51
 
     # --- Score cache ---------------------------------------------------
     def get_cached_score(self, user_uuid, job_table, job_id):
@@ -169,15 +169,19 @@ class SupabaseDatabase:
             self.logger.exception("Failed get_or_create_user for %s", discord_id)
             return None
 
-    def add_subscription(self, user_uuid, discord_id, category=None, keyword=None):
+    def add_subscription(self, user_uuid, discord_id, category=None, keyword=None,
+                         smart=False):
         """Create an alert subscription. Returns the row, or None on error.
-        (category, keyword) both None means 'every new job'."""
+        (category, keyword) both None means 'every new job'. smart=True flags a
+        résumé-match subscription (the DM hook AI-scores new jobs against the
+        user's résumé and DMs only strong fits)."""
         try:
             row = {
                 "user_id": user_uuid,
                 "discord_id": discord_id,
                 "category": category,
                 "keyword": (keyword or None),
+                "smart": bool(smart),
             }
             resp = (
                 self.supabase.table("subscriptions")
@@ -188,6 +192,137 @@ class SupabaseDatabase:
         except Exception:
             self.logger.exception("Failed adding subscription for %s", user_uuid)
             return None
+
+    def get_smart_subscribers(self):
+        """Subscriptions flagged smart (résumé-match alerts). Small table."""
+        try:
+            return (
+                self.supabase.table("subscriptions")
+                .select("*")
+                .eq("smart", True)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            self.logger.exception("Failed fetching smart subscribers")
+            return []
+
+    def was_smart_alert_sent(self, user_uuid, job_table, job_id):
+        """True if this (user, job) already got a smart alert — dedup across
+        cycles so we never DM the same role twice."""
+        try:
+            data = (
+                self.supabase.table("smart_alerts_sent")
+                .select("id")
+                .eq("user_id", user_uuid)
+                .eq("job_table", job_table)
+                .eq("job_id", int(job_id))
+                .limit(1)
+                .execute()
+                .data
+            )
+            return bool(data)
+        except Exception:
+            self.logger.exception("Failed checking smart-alert dedup")
+            return False  # On error, prefer to allow the send over silent misses.
+
+    def mark_smart_alert_sent(self, user_uuid, job_table, job_id, score=None):
+        """Record that a smart alert was DM'd for (user, job) so it isn't repeated."""
+        try:
+            self.supabase.table("smart_alerts_sent").upsert(
+                {
+                    "user_id": user_uuid,
+                    "job_table": job_table,
+                    "job_id": int(job_id),
+                    "score": score,
+                },
+                on_conflict="user_id,job_table,job_id",
+            ).execute()
+        except Exception:
+            self.logger.exception("Failed recording smart-alert send")
+
+    # --- LeetCode solve tracking (grind channel streaks) ------------------
+    def mark_leetcode_solved(self, user_uuid, problem_slug, difficulty=None):
+        """Record that a user solved a problem. Idempotent on (user, slug) so
+        toggling the ✅ react twice doesn't double-count. Returns True on success."""
+        try:
+            self.supabase.table("leetcode_solves").upsert(
+                {
+                    "user_id": user_uuid,
+                    "problem_slug": problem_slug,
+                    "difficulty": difficulty,
+                },
+                on_conflict="user_id,problem_slug",
+            ).execute()
+            return True
+        except Exception:
+            self.logger.exception("Failed recording leetcode solve")
+            return False
+
+    def unmark_leetcode_solved(self, user_uuid, problem_slug):
+        """Remove a solve record (user un-reacted). Returns True on success."""
+        try:
+            self.supabase.table("leetcode_solves").delete().eq(
+                "user_id", user_uuid
+            ).eq("problem_slug", problem_slug).execute()
+            return True
+        except Exception:
+            self.logger.exception("Failed removing leetcode solve")
+            return False
+
+    def get_leetcode_solves(self, user_uuid):
+        """All of a user's solve rows (solved_at, difficulty), newest first.
+        The streak/count is derived from these by the command layer."""
+        try:
+            return (
+                self.supabase.table("leetcode_solves")
+                .select("problem_slug,difficulty,solved_at")
+                .eq("user_id", user_uuid)
+                .order("solved_at", desc=True)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            self.logger.exception("Failed fetching leetcode solves for %s", user_uuid)
+            return []
+
+    def was_daily_posted(self, problem_date):
+        """True if the daily LeetCode post for this calendar date is already
+        recorded — the gate that stops double-posting across the scheduled loop
+        and startup catch-up. `problem_date` is a 'YYYY-MM-DD' string."""
+        try:
+            data = (
+                self.supabase.table("leetcode_daily_posts")
+                .select("id")
+                .eq("problem_date", problem_date)
+                .limit(1)
+                .execute()
+                .data
+            )
+            return bool(data)
+        except Exception:
+            self.logger.exception("Failed checking daily-post gate")
+            # On error, prefer NOT posting over spamming a duplicate.
+            return True
+
+    def mark_daily_posted(self, problem_date, problem_slug, message_id=None):
+        """Record that the daily for `problem_date` was posted. Idempotent on
+        problem_date so a race can't create two rows for one day."""
+        try:
+            self.supabase.table("leetcode_daily_posts").upsert(
+                {
+                    "problem_date": problem_date,
+                    "problem_slug": problem_slug,
+                    "message_id": int(message_id) if message_id else None,
+                },
+                on_conflict="problem_date",
+            ).execute()
+            return True
+        except Exception:
+            self.logger.exception("Failed recording daily post")
+            return False
 
     def get_subscriptions(self, user_uuid):
         try:
@@ -382,13 +517,29 @@ class SupabaseDatabase:
                 self.logger.info("No new rows to insert into %s", table)
                 return []
 
+            # Use upsert with ignore_duplicates so a single row that collides with
+            # the table's UNIQUE(company_name, job_title, job_url) constraint no
+            # longer aborts the WHOLE batch. The app-side _dedup_key normalizes
+            # title/location and ignores URL, so a role already in the DB under a
+            # different location or a rotated utm URL can still slip past the app
+            # filter and hit the raw DB constraint. A plain .insert() is
+            # all-or-nothing → one dup threw the entire insert, commit time never
+            # advanced, and the same rows failed every cycle (new grads stalled).
+            # ignore_duplicates inserts the genuinely-new rows and skips the dups.
             response = (
                 self.supabase.table(table)
-                .insert(new_internships)
+                .upsert(
+                    new_internships,
+                    on_conflict="company_name,job_title,job_url",
+                    ignore_duplicates=True,
+                )
                 .execute()
             )
 
-            self.logger.info("Inserted %d new rows into %s", len(response.data), table)
+            self.logger.info(
+                "Inserted %d new rows into %s (dups skipped)",
+                len(response.data), table,
+            )
 
             return response.data
         except Exception:
@@ -417,22 +568,27 @@ class SupabaseDatabase:
             self.logger.exception("Failed inserting companies")
             return None
 
-    def get_unsent_internships(self, table=None):
+    def get_unsent_internships(self, table=None, limit=None):
+        """Unsent rows (joined with company_info), oldest-posted first. `limit`
+        caps the fetch SERVER-SIDE — critical on the 512 MB Render box: without
+        it a backlog (e.g. 600+ new grads) pulls every row + its join into RAM at
+        once and OOMs. The poster only handles MAX_POSTS_PER_CYCLE per cycle
+        anyway, so fetching more is pure waste; the rest come next cycle."""
         table = table or self.internships_table
         try:
-            response = (
+            query = (
                 self.supabase.table(table)
-                .select("""
-                    *,
-                    company_info(*)
-                """)
+                .select("*, company_info(*)")
                 .eq("sent_to_discord", False)
                 .order("job_posted_at", desc=False)
-                .execute()
             )
+            if limit is not None:
+                query = query.limit(limit)
+            response = query.execute()
 
             self.logger.info(
-                "Found %d unsent rows in %s", len(response.data), table
+                "Found %d unsent rows in %s (limit=%s)",
+                len(response.data), table, limit,
             )
 
             return response.data

@@ -3,6 +3,8 @@ import logging
 
 import discord
 
+from commands import resume_utils
+
 
 CATEGORY_CHOICES = [
     discord.app_commands.Choice(name="Any category", value=""),
@@ -15,6 +17,10 @@ CATEGORY_CHOICES = [
 
 
 def _describe(sub):
+    if sub.get("smart"):
+        base = "**🎯 Smart match** (scored against your résumé)"
+        cat = sub.get("category")
+        return base + (f" · in **{cat}**" if cat else "")
     cat = sub.get("category") or "Any category"
     kw = sub.get("keyword")
     return f"**{cat}**" + (f" · keyword `{kw}`" if kw else "")
@@ -37,12 +43,14 @@ def register(bot, *, get_db, logger=None):
     @discord.app_commands.describe(
         category="Category to follow (or Any)",
         keyword="Optional keyword matched against company/role",
+        smart="Smart match: AI-score new roles against your résumé, DM only strong fits",
     )
     @discord.app_commands.choices(category=CATEGORY_CHOICES)
     async def subscribe(
         interaction: discord.Interaction,
         category: discord.app_commands.Choice[str] = None,
         keyword: str = None,
+        smart: bool = False,
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -57,8 +65,20 @@ def register(bot, *, get_db, logger=None):
         cat = (category.value if category else "") or None
         kw = (keyword or "").strip() or None
 
+        # A smart subscription needs a résumé to score against — if there isn't one,
+        # prompt them to upload it now (the sub is still created; it just goes
+        # live once a résumé exists).
+        resume_note = ""
+        if smart:
+            has_resume = await asyncio.to_thread(resume_utils.get_resume, db, uuid)
+            if not has_resume:
+                resume_note = (
+                    "\n\n📄 **Heads up:** smart match needs your résumé. Upload one "
+                    "with `/resume upload` and I'll start matching you to new roles."
+                )
+
         sub = await asyncio.to_thread(
-            db.add_subscription, uuid, interaction.user.id, cat, kw
+            db.add_subscription, uuid, interaction.user.id, cat, kw, smart
         )
         if not sub:
             await interaction.followup.send(
@@ -80,7 +100,7 @@ def register(bot, *, get_db, logger=None):
             )
 
         await interaction.followup.send(
-            f"🔔 Subscribed to {_describe(sub)}. I'll DM you new matches.{note}",
+            f"🔔 Subscribed to {_describe(sub)}. I'll DM you new matches.{note}{resume_note}",
             ephemeral=True,
         )
 
@@ -120,8 +140,14 @@ class _UnsubView(discord.ui.View):
 
         options = [
             discord.SelectOption(
-                label=(s.get("category") or "Any category")[:100],
-                description=(f"keyword: {s['keyword']}" if s.get("keyword") else "no keyword")[:100],
+                label=(
+                    ("🎯 Smart match" if s.get("smart")
+                     else (s.get("category") or "Any category"))
+                )[:100],
+                description=(
+                    "scored against your résumé" if s.get("smart")
+                    else (f"keyword: {s['keyword']}" if s.get("keyword") else "no keyword")
+                )[:100],
                 value=s["id"],
             )
             for s in subs[:25]

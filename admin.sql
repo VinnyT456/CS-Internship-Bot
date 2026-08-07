@@ -159,3 +159,55 @@ ALTER TABLE IF EXISTS public.users DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.resumes DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.saved_jobs DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.subscriptions DISABLE ROW LEVEL SECURITY;
+
+-- Smart (résumé-match) alerts: a subscription flagged `smart` gets the new job
+-- AI-scored against the user's résumé; a high score DMs them the role. `smart`
+-- rows may have NULL category/keyword — the match is résumé-driven, not filters.
+ALTER TABLE IF EXISTS public.subscriptions
+    ADD COLUMN IF NOT EXISTS smart BOOLEAN NOT NULL DEFAULT false;
+
+-- Dedup log for smart alerts so a user isn't DM'd the same job twice across the
+-- rolling scrape cycles. One row per (user, job) once a smart alert is sent.
+CREATE TABLE IF NOT EXISTS public.smart_alerts_sent (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id),
+    job_table TEXT NOT NULL,        -- 'internships' | 'new_grads'
+    job_id BIGINT NOT NULL,
+    score INT,                      -- the match score at send time (for audit)
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (user_id, job_table, job_id)
+);
+
+ALTER TABLE IF EXISTS public.smart_alerts_sent DISABLE ROW LEVEL SECURITY;
+
+-- LeetCode grind channel: one row per (user, problem) when a user marks a
+-- problem solved (✅ react on the daily post, or /leetcode). Powers /streak and
+-- the solve count. UNIQUE keeps re-reacting idempotent; un-reacting deletes it.
+CREATE TABLE IF NOT EXISTS public.leetcode_solves (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id),
+    problem_slug TEXT NOT NULL,
+    difficulty TEXT,                -- 'Easy' | 'Medium' | 'Hard' (nullable)
+    solved_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (user_id, problem_slug)
+);
+
+ALTER TABLE IF EXISTS public.leetcode_solves DISABLE ROW LEVEL SECURITY;
+
+-- Sent-log for the daily LeetCode post: one row per problem_date once the daily
+-- embed is posted, so the scheduled loop + startup catch-up never double-post and
+-- a day is never skipped (same idea as the internship scrape gate). UNIQUE on
+-- problem_date is the dedup key — one daily per calendar day.
+CREATE TABLE IF NOT EXISTS public.leetcode_daily_posts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    problem_date DATE NOT NULL,
+    problem_slug TEXT NOT NULL,
+    message_id BIGINT,              -- the posted Discord message (for audit/edit)
+    sent_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (problem_date)
+);
+
+ALTER TABLE IF EXISTS public.leetcode_daily_posts DISABLE ROW LEVEL SECURITY;

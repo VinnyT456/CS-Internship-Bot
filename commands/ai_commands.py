@@ -282,20 +282,10 @@ def register(bot, *, get_db, logger=None):
         from commands import job_ai
 
         job = rows[0]
-        embed, file, view, error = await job_ai.run_score(
-            db, interaction.user, table, job["id"]
+        # Same live-status animation as the Score button — score is one ~10s call.
+        await job_ai.run_score_with_status(
+            db, interaction.user, table, job["id"], interaction
         )
-        if error:
-            await interaction.followup.send(error, ephemeral=True)
-            return
-        kwargs = {"ephemeral": True}
-        if embed is not None:
-            kwargs["embed"] = embed
-        if file is not None:
-            kwargs["file"] = file
-        if view is not None:
-            kwargs["view"] = view
-        await interaction.followup.send(**kwargs)
 
     # ---- /recommend ------------------------------------------------------
     @bot.tree.command(

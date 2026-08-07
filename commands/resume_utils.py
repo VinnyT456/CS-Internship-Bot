@@ -8,9 +8,6 @@ each page into a pixmap, then PIL to stack the pages vertically into one image.
 import io
 import logging
 
-import fitz  # PyMuPDF
-from PIL import Image
-
 logger = logging.getLogger("cs_internship_bot")
 
 BUCKET = "Resumes"
@@ -24,6 +21,11 @@ class ResumeError(Exception):
 
 def _render_pdf_to_png(pdf_bytes: bytes) -> bytes:
     """PDF bytes -> a single PNG (all pages stacked vertically) as bytes."""
+    # Imported lazily so PyMuPDF + Pillow (~50 MB resident) only load when a
+    # resume is actually rendered, not at module import on the always-on box.
+    import fitz  # PyMuPDF
+    from PIL import Image
+
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:  # noqa: BLE001 — surface any fitz failure as user error

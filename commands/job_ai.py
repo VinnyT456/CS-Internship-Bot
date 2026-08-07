@@ -342,31 +342,51 @@ Keep them DISTINCT; don't count one strength under several dimensions.
 - technical_skills (Technical Alignment): how well the candidate's specific stack \
 matches the technologies THIS role requires — languages, frameworks, libraries, \
 tools, platforms. NOT overall ability: a strong engineer with a different stack \
-still scores only moderate here.
+still scores only moderate here. ANCHOR: 85 = uses most of the posting's exact \
+required stack in real work; 70 = has the core languages but misses a couple named \
+tools; 60 = some overlap, several required techs absent; 40 = mostly a different \
+stack, only loose overlap.
 - experience (Experience): how effectively the résumé shows the candidate can DO \
 this job — projects, research, internships, leadership, complexity of work. Judge \
-demonstrated experience, not years; strong projects can substitute for internships.
+demonstrated experience, not years; strong projects can substitute for internships. \
+ANCHOR: 85 = multiple substantial, relevant projects/internships showing real \
+scope; 70 = one solid relevant project + supporting work; 60 = a couple of \
+coursework-level or thin projects; 40 = little demonstrated hands-on work for this \
+kind of role.
 - domain_fit (Domain Fit): how closely the background matches the role's \
 SPECIALIZED industry knowledge (AI/ML, cybersecurity, robotics, embedded, cloud, \
 finance, data eng…). General SWE doesn't earn full credit when the role needs \
 real domain depth. When the domain IS the tech stack: technical_skills = knows \
 the tools; domain_fit = real understanding beyond them (theory, problem space, \
 shipped work). Lists the framework but no domain work → high tech, moderate \
-domain; that gap is signal.
+domain; that gap is signal. ANCHOR: 85 = shipped/deep work squarely in the role's \
+domain; 70 = adjacent domain work that clearly transfers; 60 = general SWE touching \
+the domain lightly; 40 = no real domain exposure.
 - impact (Impact & Results): does the résumé show real OUTCOMES — quantified \
 results, ownership, shipped/production work, scope — versus just listing tasks? \
-Concrete measurable achievements score high; vague responsibilities score low.
+Concrete measurable achievements score high; vague responsibilities score low. \
+ANCHOR: 85 = several quantified outcomes (%, scale, users, latency) + ownership; \
+70 = one or two real metrics, rest solid but unquantified; 60 = mostly \
+task/responsibility phrasing with a hint of outcome; 40 = pure duty list, no \
+results.
 - recency (Skill Recency): are the MATCHING skills current and repeatedly used \
 (recent projects, ongoing work) versus a stale one-off from years ago? Rewards \
-skills that are clearly still sharp for THIS role.
+skills that are clearly still sharp for THIS role. ANCHOR: 85 = the matching \
+skills appear in recent/ongoing work; 70 = used within the last year or two; 60 = \
+present but a bit dated or used once; 40 = a stale one-off from years back.
 - education (Education & Fundamentals): relevant coursework, degree fit, and CS \
 fundamentals (algorithms, systems, math) — weightier for new-grad/intern roles \
-and roles that name a required field of study.
+and roles that name a required field of study. ANCHOR: 85 = relevant degree + \
+named relevant coursework/fundamentals; 70 = relevant degree, coursework not \
+detailed; 60 = adjacent degree or in-progress with some relevant courses; 40 = \
+unrelated field or no fundamentals shown.
 - communication (Communication & Collaboration): evidence of teamwork, \
 leadership, and communication (documented projects, READMEs/docs, talks, \
 cross-functional work). Score only on real evidence; if the résumé shows none, \
 that's a low-confidence dimension — prefer not to pick it unless the posting \
-explicitly emphasizes collaboration.
+explicitly emphasizes collaboration. ANCHOR: 85 = clear leadership + documented/ \
+cross-functional work; 70 = solid team projects with some documentation; 60 = team \
+context implied but thinly shown; 40 = essentially no collaboration evidence.
 
 Anchor EVERY subscore on the same feel: 85-100 = strong direct evidence this \
 dimension is covered; 70-84 = mostly, minor gaps; 50-69 = partial, real holes; \
@@ -424,13 +444,53 @@ actually lowered the number (scored 88 → the missing pieces are minor; scored 
 This is the calibration that feeds the subscore EVIDENCE CHECK and the OVERALL \
 VALIDITY CHECK above — score like a calibrated recruiter, not generously or \
 harshly, so the numbers are reproducible, not vibes:
-1. FIRST, extract the posting's MUST-HAVE requirements (hard requirements: named \
+
+STEP 0 — THE MUST-HAVE GATE (do this FIRST). List the posting's hard MUST-HAVES. \
+For EACH, mark it PRESENT or MISSING using this STRICT test:
+   • PRESENT only if the résumé shows THAT EXACT technology, or a true 1:1 alias \
+of the same thing (e.g. "Golang" = "Go", "Postgres" = "PostgreSQL", "JS" = \
+"JavaScript", "k8s" = "Kubernetes"). A demonstrated project using that exact tech \
+counts.
+   • MISSING for everything else — including a DIFFERENT but "related", "adjacent", \
+or "transferable" technology. A distinct named language/framework/tool is its own \
+requirement: Python does NOT satisfy Go. Django does NOT satisfy FastAPI. React \
+does NOT satisfy Angular. PostgreSQL experience does NOT satisfy a MongoDB \
+must-have. Being a strong engineer in a NEIGHBORING stack does NOT make a missing \
+required tech "present" — mark it MISSING. When unsure, mark MISSING.
+   (Transferable skill still earns PARTIAL subscore credit per §2b — but a \
+different tech is NEVER "present" for the must-have gate. Two separate judgments.)
+Put every MISSING must-have in the "missing_must_haves" output field by its exact \
+name — this list is CRITICAL: the final score is clamped from it downstream, so \
+listing what's genuinely absent matters more than the number you write. A missing \
+must-have pulls the score down, but with wiggle room: one gap is still a real \
+partial fit, not an automatic reject. As a guide: 1 missing → low-to-mid 70s at \
+most; 2 missing → mid 60s; 3+ → Weak (≤49). Don't slam every gap to the floor.
+   WORKED EXAMPLE: must-haves = [Go, Kubernetes, gRPC]. Résumé is strong in \
+Python/Flask/PostgreSQL/React but shows none of Go, Kubernetes, or gRPC. Even \
+though the candidate is clearly a capable backend engineer, those three are \
+DIFFERENT technologies with no 1:1 alias present → missing_must_haves = ["Go \
+(Golang)", "Kubernetes", "gRPC"] (all three), overall ~45-49, tier "Weak". \
+Returning an EMPTY missing list here because "they're a good engineer / Python is \
+close enough" is the exact ERROR to avoid.
+
+1. Extract the posting's MUST-HAVE requirements (hard requirements: named \
 languages/frameworks, a required degree/level, a specific domain) vs the \
 PREFERRED / nice-to-haves. Judge the subscores against the must-haves first.
-2. A résumé missing a genuine MUST-HAVE cannot score in the top band, no matter \
-how strong elsewhere — cap it. Missing only nice-to-haves should barely dent the \
-score. Do NOT reward keyword presence without demonstrated use, and do NOT \
-penalize a missing keyword the candidate clearly covers under another name.
+2. MUST-HAVE CAP (hard rule — the overall score is CAPPED, not just nudged):
+   - Missing ONE genuine must-have → the overall CANNOT exceed 69 (Moderate \
+ceiling), no matter how strong everything else is. A missing required skill means \
+the résumé does not clear the bar for this role — a "Strong 84" while a must-have \
+is absent is WRONG.
+   - Missing TWO OR MORE must-haves → the overall CANNOT exceed 49 (Weak ceiling).
+   - These caps apply AFTER the weighted average — compute the average, then if a \
+must-have is missing, lower the overall to the cap. The cap wins over the math.
+   - "Missing" means no evidence in ANY form: not under another name, not a close \
+transferable equivalent, not demonstrated in a project. Do NOT penalize a keyword \
+the candidate clearly covers under a different name (a real synonym/equivalent \
+counts as PRESENT). Give partial credit for genuine transfer per §2b — a truly \
+transferable skill is not "missing." Only a real, uncovered gap triggers the cap.
+   - Missing only nice-to-haves should barely dent the score — no cap for those.
+   - Do NOT reward keyword presence without demonstrated use.
 2b. FIT is about THIS role, not overall impressiveness. An objectively strong \
 candidate whose experience points a different direction than the posting (e.g. a \
 backend/distributed-systems student applying to a frontend React role) is a \
@@ -460,11 +520,14 @@ strength.
 4. For a student/new-grad posting, weight demonstrated projects/coursework as \
 valid evidence for a must-have — don't demand industry years the posting itself \
 doesn't require.
-5. Self-check before finalizing: the overall score, the tier label, and your \
-chosen subscores must tell ONE consistent story, and the overall must actually \
-equal the weighted average of those subscores. If they don't (e.g. overall 88 \
-but a must-have is missing, or tier "Strong" with an overall of 55), fix it — \
-the evidence wins, not the vibe.
+5. Self-check before finalizing, IN THIS ORDER:
+   (a) overall = weighted average of your chosen subscores;
+   (b) apply the §2 MUST-HAVE CAP — if a must-have is missing, lower the overall \
+to 69 (one missing) or 49 (two+ missing), whichever the gaps require;
+   (c) the final overall, the tier label, and the subscores must tell ONE \
+consistent story. A "Strong 84" with a must-have missing, or tier "Strong" at an \
+overall of 55, is BROKEN — fix it so the cap and the band agree. The evidence and \
+the cap win, never the vibe.
 6. THIN INPUT — score only what's actually there. Vague posting: don't fabricate \
 must-haves; judge general readiness and land an honest moderate score, not a \
 falsely precise one. Sparse/unreadable résumé: score conservatively on visible \
@@ -501,6 +564,7 @@ entirely), and never output any placeholder or comment text.
 {{
   "score": <integer 0-100>,
   "tier": "<Excellent|Strong|Moderate|Weak>",
+  "missing_must_haves": ["<each posting MUST-HAVE the résumé does NOT show, by exact name, e.g. \"Go (Golang)\". PRESENT only for the EXACT tech or a true 1:1 alias (Golang=Go, k8s=Kubernetes); a DIFFERENT/related/transferable tech (Python for a Go must-have) is still MISSING — list it. When unsure, list it. Empty list ONLY if every must-have is genuinely present>"],
   "summary_en": "<2-3 sentences, Silver Wolf voice, explaining the score>",
   "summary_zh": "<中文：2-3 句，银狼语气，解释分数>",
   "technical_skills": <integer 0-100>,
@@ -773,6 +837,178 @@ def _build_score_embed(row, data, lang="en"):
     return embed, score
 
 
+# Must-have detection is SPLIT so the model can't rationalize a mismatch away:
+#  1. The AI does PURE EXTRACTION — just list the posting's required tech tokens,
+#     no present/missing judgment (models do plain extraction reliably).
+#  2. Python decides present/missing by matching each token against the résumé
+#     text with an alias table (code can't be talked out of a real gap).
+# Every prior attempt to make the MODEL judge missing must-haves returned [] on a
+# clear mismatch; this moves the judgment to code.
+_MUST_HAVE_EXTRACT_PROMPT = (
+    "From the JOB POSTING below, extract ONLY its hard MUST-HAVE technical "
+    "requirements — named programming languages, frameworks, libraries, tools, "
+    "platforms, or a specifically required domain. EXCLUDE anything under "
+    "'nice to have', 'preferred', 'bonus', or 'a plus'. Do NOT judge any résumé; "
+    "just list the requirements, each by its canonical name.\n\n"
+    "<posting>\n{posting}\n</posting>\n\n"
+    'Return ONLY this JSON: {{"must_haves": ["<requirement>", ...]}}'
+)
+
+# Aliases so the code matcher treats true 1:1 equivalents as the same tech. Keys
+# and values are lowercased; matching is word-boundary-ish on the résumé text.
+_TECH_ALIASES = {
+    "go": ["golang"], "golang": ["go"],
+    "kubernetes": ["k8s"], "k8s": ["kubernetes"],
+    "postgresql": ["postgres", "psql"], "postgres": ["postgresql"],
+    "javascript": ["js"], "js": ["javascript"],
+    "typescript": ["ts"],
+    "node.js": ["node", "nodejs"], "nodejs": ["node.js", "node"],
+    "c++": ["cpp"], "c#": ["c sharp", "csharp"],
+    "amazon web services": ["aws"], "aws": ["amazon web services"],
+    "google cloud": ["gcp"], "gcp": ["google cloud platform", "google cloud"],
+    "rest api": ["rest apis", "restful", "rest"],
+    "ci/cd": ["cicd", "continuous integration"],
+}
+
+
+def _resume_has_tech(resume_text, tech):
+    """True if `tech` (or a 1:1 alias) appears in the résumé text. Word-boundary-ish
+    so 'go' doesn't match 'google'. Deterministic — no model judgment."""
+    low = (resume_text or "").lower()
+    needles = [tech.lower()] + _TECH_ALIASES.get(tech.lower(), [])
+    for n in needles:
+        n = n.strip()
+        if not n:
+            continue
+        if re.search(r"(?<![a-z0-9+#.])" + re.escape(n) + r"(?![a-z0-9+#])", low):
+            return True
+    return False
+
+
+def _extract_must_haves(posting_ctx):
+    """One cheap AI call: PURE extraction of the posting's must-have tech tokens (no
+    judgment). Returns a list of names, or None on failure. Blocking."""
+    prompt = _MUST_HAVE_EXTRACT_PROMPT.format(posting=posting_ctx)
+    try:
+        data = gemma_client.ask_json_text(prompt, 800, chain=gemma_client.FAST_CHAIN)
+    except Exception:
+        log.exception("Must-have extraction call failed")
+        return None
+    if not isinstance(data, dict):
+        return None
+    mh = data.get("must_haves")
+    if not isinstance(mh, list):
+        return None
+    return [str(m).strip() for m in mh if str(m).strip()]
+
+
+def _detect_missing_must_haves(source, posting_ctx):
+    """Missing must-haves = (posting must-haves extracted by AI) MINUS (those the
+    résumé text actually shows, matched in CODE with aliases). The present/missing
+    call is deterministic, so a capable-but-mismatched résumé can't be rationalized
+    into an empty list. Only meaningful for the TEXT source (code needs résumé text
+    to scan); returns None for image-only résumés so the caller falls back. Blocking
+    — call via asyncio.to_thread."""
+    kind, payload = source
+    if kind != "text" or not payload:
+        return None  # No text to scan → let the score JSON's own list stand.
+    must_haves = _extract_must_haves(posting_ctx)
+    if not must_haves:
+        return []  # Nothing hard-required (or extraction empty) → nothing missing.
+    return [mh for mh in must_haves if not _resume_has_tech(payload, mh)]
+
+
+# Soft must-have ceilings — deliberately NOT slammed to the band floor so a
+# near-miss keeps some wiggle room (a candidate missing one required skill can
+# still read as a decent partial fit, not an automatic reject).
+_MUST_HAVE_CEILINGS = {1: 74, 2: 64}  # 3+ handled below
+_MUST_HAVE_CEILING_MANY = 49
+# Keep the tier label consistent with the clamped score.
+_TIER_BANDS = ((85, "Excellent"), (70, "Strong"), (50, "Moderate"), (30, "Weak"))
+
+
+def _tier_for(score):
+    for floor, label in _TIER_BANDS:
+        if score >= floor:
+            return label
+    return "Weak"
+
+
+def _apply_must_have_cap(data):
+    """Clamp the overall score down when the model reports missing must-haves, and
+    realign the tier. Deterministic — the prompt's soft rule doesn't reliably hold,
+    so code enforces it. Wiggle room baked into the ceilings: 1 missing → 74,
+    2 → 64, 3+ → 49. No-op if the field is absent or empty (all must-haves met)."""
+    if not isinstance(data, dict):
+        return
+    missing = data.get("missing_must_haves")
+    if not isinstance(missing, list):
+        return
+    # Count only real, non-empty entries.
+    n = sum(1 for m in missing if str(m).strip())
+    if n <= 0:
+        return
+    ceiling = _MUST_HAVE_CEILINGS.get(n, _MUST_HAVE_CEILING_MANY)
+    try:
+        score = int(data.get("score"))
+    except (TypeError, ValueError):
+        return
+    if score > ceiling:
+        log.info(
+            "Score cap: %d missing must-have(s) -> clamping %d to %d",
+            n, score, ceiling,
+        )
+        score = ceiling
+        data["score"] = ceiling
+    # Always realign the tier to the final score so number and band agree, even
+    # when we didn't clamp (the model sometimes mislabels its own tier).
+    data["tier"] = _tier_for(score)
+
+
+def _inject_gap_advice(data):
+    """Ensure the score's advice names the REAL blockers. For each detected missing
+    must-have not already called out, prepend a concrete gap + a matching quick-win
+    ('pick up X — it's required here') so the improvements target the exact required
+    skills the résumé lacks, not generic tips. Bilingual, light Silver Wolf voice.
+    No-op when nothing is missing. Respects the existing list caps."""
+    if not isinstance(data, dict):
+        return
+    missing = [str(m).strip() for m in (data.get("missing_must_haves") or []) if str(m).strip()]
+    if not missing:
+        return
+    # Only add advice for gaps not already named in the model's own gap list.
+    def _already(tech, items):
+        low = tech.lower()
+        return any(low in str(x).lower() for x in (items or []))
+
+    for lang, need_kw, req_kw in (
+        ("en", "This role needs", "required here"),
+        ("zh", "这个岗位要", "这里是硬性要求"),
+    ):
+        gaps = data.get(f"gaps_{lang}")
+        imps = data.get(f"improvements_{lang}")
+        if not isinstance(gaps, list):
+            gaps = data[f"gaps_{lang}"] = []
+        if not isinstance(imps, list):
+            imps = data[f"improvements_{lang}"] = []
+        # Prepend fresh gap + improvement lines for each still-unnamed missing tech.
+        new_gaps, new_imps = [], []
+        for tech in missing:
+            if _already(tech, gaps):
+                continue
+            if lang == "en":
+                new_gaps.append(f"{need_kw} **{tech}** and your résumé doesn't show it — that's a hard blocker for the screen.")
+                new_imps.append(f"Pick up **{tech}** (a small project or course) — it's {req_kw}, so it moves the needle most.")
+            else:
+                new_gaps.append(f"{need_kw} **{tech}**，你简历里没体现——这是过筛的硬门槛。")
+                new_imps.append(f"把 **{tech}** 补上（做个小项目或上门课）——{req_kw}，补了最提分。")
+        # Real blockers lead; keep the caps (gaps<=4, improvements<=4).
+        if new_gaps:
+            data[f"gaps_{lang}"] = (new_gaps + gaps)[:4]
+        if new_imps:
+            data[f"improvements_{lang}"] = (new_imps + imps)[:4]
+
+
 async def run_score(db, user, table, row_id):
     """Resume-vs-this-posting match. Returns (embed, file, error) — file is the
     score-wheel PNG (or None). Cached per (user, job): a repeat click skips
@@ -800,13 +1036,28 @@ async def run_score(db, user, table, row_id):
         if not source:
             return None, None, None, NEED_RESUME
 
-        prompt = _SCORE_PROMPT.format(posting=_job_context(row))
+        posting_ctx = _job_context(row)
+        prompt = _SCORE_PROMPT.format(posting=posting_ctx)
         # Cap is generous: Gemma's JSON mode can silently burn budget and return
         # empty at a tight cap (2000) yet completes cleanly at ~270 tokens with
         # 4000. Billing is on actual output, so the headroom is free.
-        data = await _ask_json_resume(source, prompt, 4000)
+        # Run the focused must-have detector CONCURRENTLY with the score — it's the
+        # reliable source of the missing list (the score JSON under-reports it).
+        data, detected_missing = await asyncio.gather(
+            _ask_json_resume(source, prompt, 4000),
+            asyncio.to_thread(_detect_missing_must_haves, source, posting_ctx),
+        )
         if not data:
             return None, None, None, "The AI couldn't score the match right now — try again later."
+
+        # Prefer the dedicated detector's missing list over the score JSON's own
+        # (which is unreliable); then deterministically clamp the score from it.
+        if detected_missing is not None:
+            data["missing_must_haves"] = detected_missing
+        _apply_must_have_cap(data)
+        # Make the advice name the REAL blockers: ensure each detected missing
+        # must-have shows up as a gap + a concrete "learn/build it" quick win.
+        _inject_gap_advice(data)
 
         await asyncio.to_thread(db.set_cached_score, uid, table, row_id, data)
 
@@ -1735,6 +1986,32 @@ def _apply_edu_extras(structured):
     return out
 
 
+def _augment_ctx_with_keywords(posting_ctx):
+    """Append an ordered PRIORITY-KEYWORD block to the posting context so the
+    rewrite + panel prompts spread the posting's real must-have techs across the
+    strongest bullets instead of cramming them. Reuses the score cap's extractor.
+    Returns posting_ctx unchanged on any failure/empty. Blocking."""
+    try:
+        keywords = _extract_must_haves(posting_ctx)
+    except Exception:
+        return posting_ctx
+    if not keywords:
+        return posting_ctx
+    block = (
+        "\n\n<priority_keywords>\n"
+        "These are the posting's highest-value must-have keywords, in priority "
+        "order: " + ", ".join(keywords[:8]) + ".\n"
+        "Where a bullet's REAL work genuinely involves one of these, surface it in "
+        "the posting's exact wording. SPREAD them across the most relevant bullets "
+        "— do NOT cram several into one line, and put the strongest/most-relevant "
+        "keyword in the bullet that best demonstrates it. NEVER add a keyword to a "
+        "bullet whose real work doesn't support it (that's fabrication, banned). A "
+        "keyword the résumé simply doesn't cover stays absent — don't force it.\n"
+        "</priority_keywords>"
+    )
+    return posting_ctx + block
+
+
 def _parse_numbered(text, expected):
     """Parse '1. ...' plain-text lines into a list of `expected` strings, in
     order. Tolerates missing numbers / wrapped continuation lines."""
@@ -1869,6 +2146,13 @@ async def _tailor_build(structured, row, progress=None):
         return {"structured": structured, "bullets": []}
 
     posting_ctx = _job_context(row)
+    # Priority-keyword placement: pull the posting's hard must-have techs (same
+    # extractor the score cap uses) and hand the rewrite + panel an ordered list to
+    # SPREAD across the strongest bullets — surfaced only where a bullet's real work
+    # supports it, never crammed into one line, never fabricated (the tech guard
+    # still reverts any invented tech). Appended to posting_ctx so both prompts see
+    # it with no signature change. Best-effort: skip silently if extraction fails.
+    posting_ctx = await asyncio.to_thread(_augment_ctx_with_keywords, posting_ctx)
     chunks = [texts[i : i + _BULLET_CHUNK] for i in range(0, len(texts), _BULLET_CHUNK)]
     # +1 for the multi-actor review pass, +1 for the no-metric polish at the end.
     total = len(chunks) + 2
@@ -2028,6 +2312,92 @@ def make_progress_updater(interaction, verb="Rewriting your résumé"):
         except Exception:
             pass  # a dropped progress edit must never break the actual work
     return progress
+
+
+_SCORE_STATUS_STEPS = [
+    "🐺 Cracking open your build…",
+    "🔍 Reading your résumé…",
+    "⚖️ Scoring it against the posting…",
+    "🎯 Checking the must-haves…",
+    "✍️ Writing up the read…",
+]
+
+
+async def _score_status_loop(interaction, stop, period=2.2):
+    """Cycle a live status line on the deferred message while the score runs, so a
+    single ~10s call doesn't look frozen. Stops when `stop` is set. Best-effort."""
+    i = 0
+    while not stop.is_set():
+        try:
+            await interaction.edit_original_response(
+                content=_SCORE_STATUS_STEPS[i % len(_SCORE_STATUS_STEPS)],
+                embed=None,
+                view=None,
+            )
+        except Exception:
+            return
+        i += 1
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=period)
+        except asyncio.TimeoutError:
+            continue
+
+
+def _jump_button(interaction):
+    """A '🔗 Jump to posting' link button pointing at the job's message, so an
+    ephemeral Score result (which Discord floats at the channel bottom) has a
+    one-click way back to the posting. Only meaningful when Score was clicked FROM
+    the posting: then interaction.message IS that posting message, so we jump to it
+    directly. Returns None for a slash-command invocation (/match) where there's no
+    such message to anchor to."""
+    import discord
+
+    guild_id = getattr(interaction, "guild_id", None)
+    msg = getattr(interaction, "message", None)
+    if not guild_id or msg is None:
+        return None
+    channel_id = getattr(getattr(msg, "channel", None), "id", None) or \
+        getattr(interaction, "channel_id", None)
+    if not channel_id:
+        return None
+    url = f"https://discord.com/channels/{guild_id}/{channel_id}/{msg.id}"
+    return discord.ui.Button(
+        label="🔗 Jump to posting", style=discord.ButtonStyle.link, url=url
+    )
+
+
+async def run_score_with_status(db, user, table, row_id, interaction):
+    """run_score wrapped in a live status animation and delivered in place. Edits
+    the deferred interaction message: cycling status → the finished score (or the
+    error). Shared by the Score button and /match so both feel responsive. The
+    interaction must already be deferred (thinking)."""
+    import discord
+
+    stop = asyncio.Event()
+    animator = asyncio.create_task(_score_status_loop(interaction, stop))
+    try:
+        embed, file, view, error = await run_score(db, user, table, row_id)
+    finally:
+        stop.set()
+        try:
+            await animator
+        except Exception:
+            pass
+    if error:
+        await interaction.edit_original_response(content=error, embed=None, view=None)
+        return
+    # Add a one-click way back to the posting (the ephemeral result floats at the
+    # channel bottom, so scoring an old posting otherwise means scrolling).
+    if view is not None:
+        jump = _jump_button(interaction)
+        if jump is not None:
+            view.add_item(jump)
+    kwargs = {"content": None, "attachments": [file] if file is not None else []}
+    if embed is not None:
+        kwargs["embed"] = embed
+    if view is not None:
+        kwargs["view"] = view
+    await interaction.edit_original_response(**kwargs)
 
 
 async def deliver_tailor(interaction, embed, file, view):
@@ -2770,7 +3140,7 @@ async def run_tailor(db, user, table, row_id, progress=None):
 
 # Bump when the Tailor prompt / blob schema changes so stale caches (old voice,
 # old bullet variants) are ignored and regenerated with the current prompt.
-_TAILOR_BLOB_VERSION = 29
+_TAILOR_BLOB_VERSION = 30
 
 
 def _dump_blob(blob):
