@@ -49,16 +49,44 @@ _TRANSIENT_EXC_NAMES = {
     "ReadError", "WriteError", "PoolTimeout", "ServerError",
 }
 
-_client = None
+# --- API key pool (Tier 2: a second key doubles the real per-minute quota) ---
+# Each Gemini free-tier key is a SEPARATE project quota, so spreading calls across
+# N keys multiplies the ceiling by N. Provide extra keys via GEMINI_API_KEYS
+# (comma-separated); GEMINI_API_KEY stays supported for a single key. Calls
+# round-robin across keys, and on a 429 the retry rotates to the NEXT key (not
+# just the next model) so a throttled key doesn't sink the request.
+def _load_api_keys():
+    raw = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY") or ""
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    return keys or [None]  # [None] lets genai fall back to its own env lookup
+
+
+_API_KEYS = _load_api_keys()
+_clients = {}  # key-string -> genai.Client (lazy, one per key)
+import itertools  # noqa: E402
+
+_key_cycle = itertools.cycle(range(len(_API_KEYS)))
+
+
+def _client_for(idx):
+    """The genai client for key index `idx` (lazily built, cached)."""
+    key = _API_KEYS[idx % len(_API_KEYS)]
+    if key not in _clients:
+        from google import genai
+
+        _clients[key] = genai.Client(api_key=key) if key else genai.Client()
+    return _clients[key]
 
 
 def _get_client():
-    global _client
-    if _client is None:
-        from google import genai
+    """Next client in the round-robin. Kept for callers/tests that want a client;
+    _generate does its own per-attempt key rotation."""
+    return _client_for(next(_key_cycle))
 
-        _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    return _client
+
+def key_count():
+    """How many API keys are configured (for logging/diagnostics)."""
+    return len(_API_KEYS)
 
 
 def _status_of(exc):
@@ -70,42 +98,56 @@ def _status_of(exc):
     return None
 
 
-def _generate(contents, config=None, chain=None):
-    """Call generate_content with retry + model rotation over `chain` (defaults
-    to SMART_CHAIN). Returns the response, or raises the last error if every
-    model/attempt fails.
+# Concurrency cap (Tier 1): bound simultaneous in-flight API calls so a burst
+# (many users, or Smart-Alert scoring) becomes a smooth queue that stays under the
+# per-minute limit instead of firing all at once and tripping 429s. Calls are
+# blocking and run in threads (to_thread), so a threading.Semaphore is the right
+# primitive. Default 4 — comfortably parallel, well under free-tier burst limits.
+import threading  # noqa: E402
 
-    Order: for each model in the chain, try up to _RETRIES_PER_MODEL times with
-    exponential backoff on transient (429/5xx) errors; a non-transient error
-    aborts immediately."""
-    client = _get_client()
+_MAX_CONCURRENCY = int(os.getenv("GEMINI_MAX_CONCURRENCY", "4"))
+_inflight = threading.BoundedSemaphore(_MAX_CONCURRENCY)
+
+
+def _generate(contents, config=None, chain=None):
+    """Call generate_content with a concurrency cap, retry, and model+KEY rotation.
+    Returns the response, or raises the last error if every model/key/attempt fails.
+
+    Order: bounded by the in-flight semaphore, then for each model in `chain`
+    (defaults to SMART_CHAIN), try up to _RETRIES_PER_MODEL times with exponential
+    backoff on transient (429/5xx) errors — EACH attempt uses the next API key in
+    the round-robin, so a throttled key is skipped rather than retried. A
+    non-transient error aborts immediately."""
     last_exc = None
-    for model in (chain or SMART_CHAIN):
-        for attempt in range(_RETRIES_PER_MODEL):
-            try:
-                return client.models.generate_content(
-                    model=model, contents=contents, config=config
-                )
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                status = _status_of(exc)
-                exc_name = type(exc).__name__
-                transient = (
-                    status in _TRANSIENT_STATUSES
-                    or exc_name in _TRANSIENT_EXC_NAMES
-                )
-                if not transient:
-                    # Real error (bad request, auth, etc.) — don't waste retries.
-                    raise
-                # Backoff before the next attempt on this model.
-                if attempt < _RETRIES_PER_MODEL - 1:
-                    delay = _RETRY_BASE_DELAY * (2**attempt)
-                    logger.warning(
-                        "Gemma %s transient %s — retry %d/%d in %.1fs",
-                        model, status, attempt + 1, _RETRIES_PER_MODEL, delay,
+    with _inflight:  # cap concurrent calls; a burst queues here instead of 429-ing
+        for model in (chain or SMART_CHAIN):
+            for attempt in range(_RETRIES_PER_MODEL):
+                # Rotate the key every attempt — spreads load and skips a throttled
+                # key on retry (the main lever when multiple keys are configured).
+                client = _client_for(next(_key_cycle))
+                try:
+                    return client.models.generate_content(
+                        model=model, contents=contents, config=config
                     )
-                    time.sleep(delay)
-        logger.warning("Gemma %s exhausted retries — rotating model", model)
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    status = _status_of(exc)
+                    exc_name = type(exc).__name__
+                    transient = (
+                        status in _TRANSIENT_STATUSES
+                        or exc_name in _TRANSIENT_EXC_NAMES
+                    )
+                    if not transient:
+                        raise  # real error (bad request, auth) — don't burn retries
+                    if attempt < _RETRIES_PER_MODEL - 1:
+                        delay = _RETRY_BASE_DELAY * (2**attempt)
+                        logger.warning(
+                            "Gemma %s transient %s — retry %d/%d in %.1fs (keys=%d)",
+                            model, status, attempt + 1, _RETRIES_PER_MODEL, delay,
+                            len(_API_KEYS),
+                        )
+                        time.sleep(delay)
+            logger.warning("Gemma %s exhausted retries — rotating model", model)
     if last_exc:
         raise last_exc
     raise RuntimeError("No Gemma model available")

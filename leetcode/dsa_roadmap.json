@@ -1,0 +1,137 @@
+{
+  "_note": "DS&A learning roadmap. Ordered curriculum modeled on labuladong's framework (data structures first, then patterns/algorithms built on them) and hello-algo's topic set. Each entry: key (stable id), name, category, tier (1=foundational .. 5=advanced, drives learning order), prereqs (keys to learn first), tag (LeetCode API topic slug for /learn practice problems), examples (curated starter problem slugs). The Silver Wolf lesson text is AI-generated on demand from `name` — nothing here is scraped, so it never goes stale.",
+  "categories": [
+    {"key": "data_structures", "name": "Data Structures", "emoji": "🧱"},
+    {"key": "techniques", "name": "Core Techniques", "emoji": "⚙️"},
+    {"key": "searching", "name": "Search & Traversal", "emoji": "🔍"},
+    {"key": "dp", "name": "Dynamic Programming", "emoji": "🧩"},
+    {"key": "advanced", "name": "Advanced", "emoji": "🚀"}
+  ],
+  "patterns": [
+    {
+      "key": "arrays", "name": "Arrays & Strings", "category": "data_structures",
+      "tier": 1, "prereqs": [], "tag": "array",
+      "examples": ["two-sum", "best-time-to-buy-and-sell-stock", "contains-duplicate"]
+    },
+    {
+      "key": "hashing", "name": "Hash Maps & Sets", "category": "data_structures",
+      "tier": 1, "prereqs": ["arrays"], "tag": "hash-table",
+      "examples": ["two-sum", "group-anagrams", "longest-consecutive-sequence"]
+    },
+    {
+      "key": "linked_list", "name": "Linked Lists", "category": "data_structures",
+      "tier": 1, "prereqs": ["arrays"], "tag": "linked-list",
+      "examples": ["reverse-linked-list", "merge-two-sorted-lists", "linked-list-cycle"]
+    },
+    {
+      "key": "stack_queue", "name": "Stacks & Queues", "category": "data_structures",
+      "tier": 1, "prereqs": ["arrays"], "tag": "stack",
+      "examples": ["valid-parentheses", "min-stack", "daily-temperatures"]
+    },
+    {
+      "key": "two_pointers", "name": "Two Pointers", "category": "techniques",
+      "tier": 2, "prereqs": ["arrays"], "tag": "two-pointers",
+      "examples": ["valid-palindrome", "two-sum-ii-input-array-is-sorted", "3sum", "container-with-most-water"]
+    },
+    {
+      "key": "sliding_window", "name": "Sliding Window", "category": "techniques",
+      "tier": 2, "prereqs": ["two_pointers"], "tag": "sliding-window",
+      "examples": ["longest-substring-without-repeating-characters", "minimum-window-substring", "permutation-in-string"]
+    },
+    {
+      "key": "prefix_sum", "name": "Prefix Sum", "category": "techniques",
+      "tier": 2, "prereqs": ["arrays"], "tag": "prefix-sum",
+      "examples": ["range-sum-query-immutable", "subarray-sum-equals-k", "product-of-array-except-self"]
+    },
+    {
+      "key": "difference_array", "name": "Difference Array", "category": "techniques",
+      "tier": 3, "prereqs": ["prefix_sum"], "tag": "prefix-sum",
+      "examples": ["corporate-flight-bookings", "range-addition", "car-pooling"]
+    },
+    {
+      "key": "binary_search", "name": "Binary Search", "category": "searching",
+      "tier": 2, "prereqs": ["arrays"], "tag": "binary-search",
+      "examples": ["binary-search", "search-in-rotated-sorted-array", "find-minimum-in-rotated-sorted-array", "koko-eating-bananas"]
+    },
+    {
+      "key": "fast_slow", "name": "Fast & Slow Pointers (Cycle)", "category": "techniques",
+      "tier": 3, "prereqs": ["linked_list", "two_pointers"], "tag": "two-pointers",
+      "examples": ["linked-list-cycle", "linked-list-cycle-ii", "find-the-duplicate-number", "happy-number"]
+    },
+    {
+      "key": "matrix", "name": "2D Matrix", "category": "data_structures",
+      "tier": 2, "prereqs": ["arrays"], "tag": "matrix",
+      "examples": ["set-matrix-zeroes", "spiral-matrix", "rotate-image", "number-of-islands"]
+    },
+    {
+      "key": "trees", "name": "Binary Trees", "category": "data_structures",
+      "tier": 2, "prereqs": ["stack_queue"], "tag": "tree",
+      "examples": ["maximum-depth-of-binary-tree", "invert-binary-tree", "binary-tree-level-order-traversal", "diameter-of-binary-tree"]
+    },
+    {
+      "key": "bst", "name": "Binary Search Trees (BST)", "category": "data_structures",
+      "tier": 3, "prereqs": ["trees", "binary_search"], "tag": "binary-search-tree",
+      "examples": ["search-in-a-binary-search-tree", "validate-binary-search-tree", "kth-smallest-element-in-a-bst", "lowest-common-ancestor-of-a-binary-search-tree", "insert-into-a-binary-search-tree"]
+    },
+    {
+      "key": "bfs", "name": "BFS (Breadth-First Search)", "category": "searching",
+      "tier": 3, "prereqs": ["trees", "stack_queue"], "tag": "breadth-first-search",
+      "examples": ["binary-tree-level-order-traversal", "rotting-oranges", "word-ladder"]
+    },
+    {
+      "key": "dfs", "name": "DFS (Depth-First Search) & Backtracking", "category": "searching",
+      "tier": 3, "prereqs": ["trees"], "tag": "backtracking",
+      "examples": ["number-of-islands", "subsets", "permutations", "combination-sum", "word-search"]
+    },
+    {
+      "key": "graphs", "name": "Graphs", "category": "advanced",
+      "tier": 4, "prereqs": ["bfs", "dfs"], "tag": "graph",
+      "examples": ["course-schedule", "clone-graph", "pacific-atlantic-water-flow", "number-of-connected-components-in-an-undirected-graph"]
+    },
+    {
+      "key": "heap", "name": "Heaps / Priority Queue", "category": "data_structures",
+      "tier": 3, "prereqs": ["trees"], "tag": "heap-priority-queue",
+      "examples": ["kth-largest-element-in-an-array", "top-k-frequent-elements", "find-median-from-data-stream", "merge-k-sorted-lists"]
+    },
+    {
+      "key": "greedy", "name": "Greedy", "category": "techniques",
+      "tier": 3, "prereqs": ["arrays"], "tag": "greedy",
+      "examples": ["jump-game", "gas-station", "merge-intervals", "non-overlapping-intervals"]
+    },
+    {
+      "key": "intervals", "name": "Intervals", "category": "techniques",
+      "tier": 3, "prereqs": ["greedy"], "tag": "array",
+      "examples": ["merge-intervals", "insert-interval", "non-overlapping-intervals", "meeting-rooms"]
+    },
+    {
+      "key": "monotonic_stack", "name": "Monotonic Stack", "category": "techniques",
+      "tier": 4, "prereqs": ["stack_queue"], "tag": "monotonic-stack",
+      "examples": ["daily-temperatures", "next-greater-element-i", "largest-rectangle-in-histogram", "car-fleet"]
+    },
+    {
+      "key": "dp_1d", "name": "1D Dynamic Programming", "category": "dp",
+      "tier": 4, "prereqs": ["arrays"], "tag": "dynamic-programming",
+      "examples": ["climbing-stairs", "house-robber", "coin-change", "longest-increasing-subsequence", "word-break"]
+    },
+    {
+      "key": "dp_2d", "name": "2D Dynamic Programming", "category": "dp",
+      "tier": 5, "prereqs": ["dp_1d", "matrix"], "tag": "dynamic-programming",
+      "examples": ["unique-paths", "longest-common-subsequence", "edit-distance", "coin-change-ii", "target-sum"]
+    },
+    {
+      "key": "tries", "name": "Tries", "category": "advanced",
+      "tier": 4, "prereqs": ["trees", "hashing"], "tag": "trie",
+      "examples": ["implement-trie-prefix-tree", "design-add-and-search-words-data-structure", "word-search-ii"]
+    },
+    {
+      "key": "union_find", "name": "Union-Find (DSU)", "category": "advanced",
+      "tier": 4, "prereqs": ["graphs"], "tag": "union-find",
+      "examples": ["number-of-connected-components-in-an-undirected-graph", "redundant-connection", "accounts-merge"]
+    },
+    {
+      "key": "bit_manipulation", "name": "Bit Manipulation", "category": "advanced",
+      "tier": 3, "prereqs": ["arrays"], "tag": "bit-manipulation",
+      "examples": ["single-number", "number-of-1-bits", "counting-bits", "reverse-bits"]
+    }
+  ]
+}

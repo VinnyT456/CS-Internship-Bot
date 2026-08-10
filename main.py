@@ -59,8 +59,10 @@ LEETCODE_CHANNEL_ID = int(_LEETCODE_CHANNEL_RAW) if _LEETCODE_CHANNEL_RAW else N
 # Announcement channel — Silver Wolf posts patch notes when new features ship.
 _ANNOUNCE_CHANNEL_RAW = os.getenv("ANNOUNCE_CHANNEL_ID", "1535045565598011472")
 ANNOUNCE_CHANNEL_ID = int(_ANNOUNCE_CHANNEL_RAW) if _ANNOUNCE_CHANNEL_RAW else None
-# Hour (UTC) to post the daily LeetCode problem. Default 14:00 UTC ≈ 9am ET.
-LEETCODE_POST_HOUR_UTC = int(os.getenv("LEETCODE_POST_HOUR_UTC", "14"))
+# Hour (UTC) to post the daily LeetCode problem. Default 0 = 00:00 UTC, which is
+# when LeetCode's daily resets (= 8pm EDT / 7pm EST). Posts the fresh problem right
+# at the reset. UTC is fixed; the ET equivalent shifts one hour with daylight saving.
+LEETCODE_POST_HOUR_UTC = int(os.getenv("LEETCODE_POST_HOUR_UTC", "0"))
 
 CATEGORY_COLORS = {
     "Software Engineering": discord.Color.blue(),
@@ -1263,6 +1265,18 @@ async def check_new_internships():
     channel = await get_cached_channel("internships", INTERNSHIPS_CHANNEL_ID)
 
     await _post_batch(rows, channel, "internships", "internships")
+
+    # Opportunistic LeetCode daily catch-up: post_daily_if_missing is gated on the
+    # daily's date, so calling it here every 15 min is a no-op once today's daily is
+    # up — but it self-heals if the scheduled 00:00 UTC fire was ever missed (a
+    # deploy, a brief hiccup), so the daily always lands the same day.
+    if LEETCODE_CHANNEL_ID:
+        try:
+            lc_channel = await get_cached_channel("leetcode", LEETCODE_CHANNEL_ID)
+            if await leetcode_cmd.post_daily_if_missing(bot, lc_channel, get_db):
+                logger.info("📓 Posted LeetCode daily (scrape-loop catch-up)")
+        except Exception:
+            logger.exception("LeetCode daily catch-up (scrape loop) failed")
 
     elapsed = time.perf_counter() - start
     logger.info("✅ Scrape completed in %.2f seconds", elapsed)

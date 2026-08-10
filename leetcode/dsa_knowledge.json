@@ -1,0 +1,230 @@
+{
+  "_note": "Per-pattern ground-truth distilled from the user's own learning notes (leetcode-data-structures-learning-patterns.md). Injected into the /learn lesson prompt so the AI voices ACCURATE, doc-grounded facts (signal, state, template, complexity, misconception) in Silver Wolf's voice, instead of relying on the model's general recall (which drifts). Keyed by roadmap pattern key. Fields: signal (input shape + trigger words), key_question (the question the pattern answers), state (what to track), template (language-agnostic skeleton), complexity, misconception (corrected into a rule), mental_model.",
+  "patterns": {
+    "prefix_sum": {
+      "signal": "Repeated range sums over an array (sum from L to R, many queries), OR finding/counting a hidden subarray with a target sum.",
+      "key_question": "Can cumulative totals remove repeated work? A prefix sum is a running-total snapshot — each entry already contains all previous work.",
+      "state": "A running total, a prefix array, and for hidden-subarray problems a set (seen?) or map (prefix -> count, or prefix -> first index).",
+      "template": "prefix[0] = nums[0]\nfor i in 1..n-1: prefix[i] = prefix[i-1] + nums[i]\nrange_sum(L,R) = prefix[R] if L==0 else prefix[R]-prefix[L-1]\n# hidden subarray sum k:\nprefix=0; seen={0}\nfor num in nums:\n  prefix += num\n  if prefix-k in seen: found\n  add prefix to seen",
+      "complexity": "O(n) preprocessing, then each fixed range query is O(1).",
+      "misconception": "Do NOT loop over the prefix array to answer a range query — that double-counts, because each prefix value already includes everything before it. A range sum is ONE subtraction. Also: seed the seen-set with 0 (the invisible total before the array starts) so subarrays beginning at index 0 are detected.",
+      "mental_model": "sum(L..R) = everything through R minus everything before L."
+    },
+    "difference_array": {
+      "signal": "Many RANGE UPDATES: 'add x to every element from L to R', repeated. Avoid touching every element in every update.",
+      "key_question": "Can I mark WHERE an update starts and stops instead of applying it everywhere?",
+      "state": "A diff array of zeros, then a running total to recover final values.",
+      "template": "diff = zeros(n)\nfor (L,R,val) in updates:\n  diff[L] += val\n  if R+1 < n: diff[R+1] -= val\nrunning = 0\nfor i in 0..n-1:\n  running += diff[i]\n  nums[i] += running",
+      "complexity": "O(number_of_updates + array_length), vs O(updates * average_range_length) naively.",
+      "misconception": "Difference arrays store EVENT MARKERS, not final values. You recover the real values with a prefix sum over the diff array at the end.",
+      "mental_model": "Start applying the effect at L; stop applying it after R. It's the range-update counterpart to prefix sum's range-query."
+    },
+    "sliding_window": {
+      "signal": "Continuous subarray/substring. Trigger words: subarray, substring, consecutive, continuous, longest, shortest, at most, at least, without repeating.",
+      "key_question": "What makes my current window VALID or invalid?",
+      "state": "left and right pointers, plus whatever summarizes the window (a running sum, or a frequency map when duplicates/counts matter).",
+      "template": "# longest valid window:\nleft=0\nfor right in 0..n-1:\n  add nums[right]\n  while window invalid: remove nums[left]; left+=1\n  answer = max(answer, right-left+1)\n# shortest valid window: record WHILE valid, then shrink:\nleft=0\nfor right in 0..n-1:\n  add nums[right]\n  while window valid: answer=min(answer,right-left+1); remove nums[left]; left+=1",
+      "complexity": "O(n) — each pointer only moves forward.",
+      "misconception": "Shortest-window is NOT just longest-window with min instead of max. Longest: fix invalidity first, THEN record. Shortest: record while valid, then shrink aggressively until invalid. Also: a set isn't enough when duplicates matter — use a frequency map. For character-replacement, max_freq can be stale (only ever increases) and that's intentionally fine.",
+      "mental_model": "Expand with right; only move left when needed to restore validity. Each required char type in min-window is a checkbox — extra copies don't create extra checkboxes."
+    },
+    "binary_search": {
+      "signal": "Sorted data, OR a monotonic true/false condition over an answer range (even with no sorted input array).",
+      "key_question": "Which half can I eliminate? Binary search doesn't find the answer directly — it eliminates impossible answers.",
+      "state": "left, right, mid, and (for boundary/answer search) a saved best answer.",
+      "template": "# exact:\nl,r=0,n-1\nwhile l<=r:\n  mid=(l+r)//2\n  if a[mid]==target: return mid\n  elif a[mid]<target: l=mid+1\n  else: r=mid-1\n# binary search on the ANSWER:\nl,r=min_possible,max_possible; ans=None\nwhile l<=r:\n  mid=(l+r)//2\n  if can_do(mid): ans=mid; r=mid-1   # search for a better (smaller) one\n  else: l=mid+1\nreturn ans",
+      "complexity": "O(log n), or O(log(answer_range) * helper_cost) for binary search on the answer.",
+      "misconception": "Binary search does NOT require an actual sorted array — it requires a monotonic property. In boundary problems, finding a valid value isn't enough: save it, then ask whether a better boundary exists. You do NOT build an array of all possible answers; the helper computes only the value at mid when asked.",
+      "mental_model": "The helper function acts like an imaginary sorted boolean array: F F F T T T — find the first T."
+    },
+    "linked_list": {
+      "signal": "Nodes with next pointers: reverse, reorder, rotate, swap, merge, find middle/cycle/split.",
+      "key_question": "Which links must I preserve before rewiring? What pointers keep me from losing access to the list?",
+      "state": "prev, curr, next for reversal; a dummy node + tail for building; two pointers for merge; slow/fast for structure.",
+      "template": "# iterative reversal (save next BEFORE rewiring):\nprev=None; curr=head\nwhile curr:\n  nxt=curr.next\n  curr.next=prev\n  prev=curr\n  curr=nxt\nreturn prev\n# build with dummy+tail:\ndummy=Node(); tail=dummy\nfor node in chosen: tail.next=node; tail=tail.next\nreturn dummy.next",
+      "complexity": "O(n); reversal and merge are O(1) extra space.",
+      "misconception": "Recursive reversal does NOT reverse on the way down — it reverses one link at a time on the way back UP the call stack; 'head.next = null' breaks the old forward link to avoid a cycle. Save next_node BEFORE changing curr.next or you lose the rest of the list.",
+      "mental_model": "For a fixed number of lists, a fixed number of pointers is fine; for many lists, use a heap. A dummy node makes appending O(1) and removes head-edge-cases."
+    },
+    "fast_slow": {
+      "signal": "Discovering structure in a linked list: middle, cycle detection, start of cycle, split, palindrome, reorder.",
+      "key_question": "Where do I want slow to land, and which loop condition puts it there?",
+      "state": "slow and fast pointers, both starting at head.",
+      "template": "slow=head; fast=head\nwhile fast and fast.next:\n  slow=slow.next\n  fast=fast.next.next\n# 'while fast and fast.next' -> slow at the SECOND middle (even length)\n# 'while fast.next and fast.next.next' -> slow at the FIRST middle,\n#   which pairs with: second = reverse(slow.next)",
+      "complexity": "O(n) time, O(1) space.",
+      "misconception": "Different loop conditions INTENTIONALLY stop slow at different middle positions. Pick the condition based on which middle you need (e.g. palindrome / reorder need the first middle).",
+      "mental_model": "Fast moves twice per slow step, so when fast hits the end, slow is at the middle; if there's a cycle, fast laps slow and they meet."
+    },
+    "trees": {
+      "signal": "Binary tree; the answer depends on the children; no cycles.",
+      "key_question": "What should this recursive call RETURN to its parent, and what answer can I update at this node?",
+      "state": "The recursive return value (e.g. height); optionally a global answer updated during recursion.",
+      "template": "def dfs(node):\n  if node is None: return base_value\n  left = dfs(node.left)\n  right = dfs(node.right)\n  update global answer if needed\n  return value_the_parent_needs",
+      "complexity": "O(n) — each node processed once.",
+      "misconception": "Traversal choice is a CONSEQUENCE of information flow, not a memorized label. Preorder = process on arrival (parent decides before children). Postorder = process after both children (parent needs their answers, e.g. height/diameter/balanced/max-path-sum). Inorder = between left and right (only meaningful for a BST). For max path sum, initialize the global answer to negative infinity, not 0 — all values may be negative.",
+      "mental_model": "Manager/report model: the parent trusts each child to summarize its whole subtree and return one piece of info. Some problems flow reports UP (height), others pass instructions DOWN (validate-BST passes (low,high))."
+    },
+    "bfs": {
+      "signal": "Output grouped by depth/level, shortest distance in an unweighted graph, or 'spreading over time' (each layer = one time step).",
+      "key_question": "What do I need from each LEVEL? What are all the starting points at time 0 (multi-source)?",
+      "state": "A queue seeded with the start(s); freeze each level with level_size before processing.",
+      "template": "queue=[root]  # or all sources for multi-source\nwhile queue:\n  level_size = len(queue)      # freeze this level\n  for _ in range(level_size):\n    node = queue.popleft()\n    process node\n    add valid neighbors (mark them ON ENQUEUE)\n  time/level += 1",
+      "complexity": "O(V+E) for graphs, O(m*n) for grids — each node/cell once.",
+      "misconception": "'level_size = len(queue)' is what freezes the current level even though children are added while processing. For right-side view via BFS you do NOT need to add the right child first — process left-to-right and take the LAST node in the level. In multi-source BFS, mark a cell the moment you discover it (before enqueue) to prevent duplicate enqueueing.",
+      "mental_model": "DFS asks what children return upward; BFS asks what happens at each level. One BFS level = one minute / one unit of distance."
+    },
+    "dfs": {
+      "signal": "Explore an entire connected region, enumerate all choices (backtracking), path-based reasoning, or cycle detection via recursion state.",
+      "key_question": "For traversal: have I visited this node? For backtracking: what choices are available, what makes a partial path invalid, when do I record, and what must I undo?",
+      "state": "A visited set (graphs); for backtracking a path list + the choice set.",
+      "template": "# graph/grid flood fill:\ndef dfs(node):\n  if node visited or invalid: return\n  mark visited\n  for nb in neighbors(node): dfs(nb)\n# backtracking: choose -> explore -> unchoose\ndef backtrack(state):\n  if complete: result.append(copy(path)); return\n  for choice in valid_choices(state):\n    make choice\n    backtrack(next_state)\n    undo choice",
+      "complexity": "O(V+E) traversal; backtracking is exponential in the number of choices.",
+      "misconception": "In a GRID, the traversal skeleton stays the same — only the definition of 'neighbor' changes (4 dirs vs 8 for diagonals). If you mutate visited land into water, then 'water' and 'already visited' become the same check. Backtracking's whole trick is the UNDO step after exploring each choice.",
+      "mental_model": "A grid is secretly a graph: each cell is a node, neighbors come from coordinate offsets. choose -> explore -> unchoose."
+    },
+    "graphs": {
+      "signal": "Arbitrary neighbors, possible cycles, connected components, reachability. Directed edges + dependencies = cycle detection.",
+      "key_question": "Have I already visited this node? (undirected) — or — am I revisiting a node currently ON MY PATH? (directed cycle).",
+      "state": "A visited set (undirected); three colors white/gray/black (directed cycle detection).",
+      "template": "# connected components:\nvisited=set(); components=0\nfor node in all_nodes:\n  if node not in visited: dfs(node); components+=1\n# directed cycle (three-color):\nWHITE,GRAY,BLACK=0,1,2\ndef has_cycle(u):\n  if state[u]==GRAY: return True\n  if state[u]==BLACK: return False\n  state[u]=GRAY\n  for v in adj[u]:\n    if has_cycle(v): return True\n  state[u]=BLACK; return False",
+      "complexity": "O(V+E).",
+      "misconception": "A normal visited set prevents loops in UNDIRECTED graphs but is NOT enough for DIRECTED cycle detection — seeing a visited node isn't always a cycle. A cycle is revisiting a GRAY node (one still on the current DFS path). The 'if not visited' check in components isn't just efficiency — it's what stops you counting the same component twice.",
+      "mental_model": "Trees ask 'left or right?'; graphs ask 'which neighbors, and have I already been there?' Gray = currently checking this path; black = done checking it."
+    },
+    "heap": {
+      "signal": "Repeatedly need the smallest/largest, top-K, a streaming median, or merging many sorted sources.",
+      "key_question": "Do I repeatedly need the min/max? Can I keep only K elements? Is the input streaming?",
+      "state": "A heap (priority queue), often bounded to size K.",
+      "template": "# top-k with a bounded heap:\nheap=[]\nfor item in input:\n  push(heap, item)\n  if len(heap) > k: pop worst\nreturn heap",
+      "complexity": "O(n log k) when the heap stays size k.",
+      "misconception": "For kth-smallest in a BST, inorder gives sorted order — no heap needed. But for a GENERAL binary tree that guarantee disappears, so a heap (or sorting) becomes the tool. Use a max-heap of size k for kth-smallest when k is small; a min-heap for kth-largest.",
+      "mental_model": "A heap gives O(log n) access to the current best without fully sorting — pay log n per op instead of n log n once."
+    },
+    "greedy": {
+      "signal": "A local best choice seems enough; often 'intervals', 'jumps', 'minimum number of...'. Sorting frequently makes the greedy choice obvious.",
+      "key_question": "What local choice seems best, what invariant does it preserve, and can I prove I never need to revisit an earlier decision?",
+      "state": "A single running invariant (e.g. farthest reach, current end of last interval).",
+      "template": "# Jump Game:\nfarthest=0\nfor i in 0..n-1:\n  if i > farthest: return False\n  farthest = max(farthest, i + nums[i])\nreturn True",
+      "complexity": "Often O(n) or O(n log n) when sorting is needed.",
+      "misconception": "Greedy only works if the local best choice is PROVABLY safe globally — if a counterexample forces revisiting a past decision, greedy is wrong and you likely need DP. Don't reach for greedy just because it's simple.",
+      "mental_model": "Track the best reach/state so far; if the current position falls outside it, the path is impossible."
+    },
+    "intervals": {
+      "signal": "A list of [start, end] intervals: merge overlaps, insert, count overlaps, minimum rooms/removals.",
+      "key_question": "After sorting by start (or end), does the current interval overlap the previous one?",
+      "state": "The sorted intervals and the current merged/last interval's end.",
+      "template": "sort intervals by start\nmerged=[]\nfor iv in intervals:\n  if merged and iv.start <= merged[-1].end:\n    merged[-1].end = max(merged[-1].end, iv.end)   # overlap -> extend\n  else:\n    merged.append(iv)                              # gap -> new interval",
+      "complexity": "O(n log n) dominated by the sort.",
+      "misconception": "Sorting choice matters: sort by START to merge; sort by END for maximum non-overlapping (activity selection). The greedy choice is only obvious AFTER the right sort.",
+      "mental_model": "Overlap check is 'does this one start before the last one ended?' Everything else is bookkeeping."
+    },
+    "monotonic_stack": {
+      "signal": "'Next/previous greater/smaller element', spans, histograms, temperatures — you need the nearest element with some order relation.",
+      "key_question": "As I scan, which earlier elements are now useless because the current element dominates them?",
+      "state": "A stack kept in monotonic (increasing or decreasing) order, usually of indices.",
+      "template": "stack=[]  # indices, values decreasing\nfor i, x in enumerate(nums):\n  while stack and nums[stack[-1]] < x:\n    j = stack.pop()\n    answer[j] = i - j        # x is the next-greater for j\n  stack.append(i)",
+      "complexity": "O(n) — each index is pushed and popped at most once.",
+      "misconception": "It looks like a nested loop but it's O(n): the while-loop total pops are bounded by total pushes. Store INDICES (not values) when you need distances/positions.",
+      "mental_model": "The stack holds candidates still waiting for their answer; the current element resolves and discards the ones it dominates."
+    },
+    "dp_1d": {
+      "signal": "Overlapping subproblems on a 1D sequence: count ways, min/max cost, can-you-reach, longest-something. Choices that build on smaller prefixes.",
+      "key_question": "What is the STATE? What choice do I have at this state? Which smaller states does it depend on? What's the base case? Is the answer a count, min, max, boolean, or sequence?",
+      "state": "dp[i] = the answer for the subproblem ending at / using the first i elements.",
+      "template": "# top-down memo:\ndef dp(state):\n  if base: return base_answer\n  if state in memo: return memo[state]\n  ans = combine(dp(smaller states))\n  memo[state]=ans; return ans\n# bottom-up:\ndp[base]=base_answer\nfor state in valid_order: dp[state]=combine(previous)\nreturn dp[target]",
+      "complexity": "O(number_of_states * work_per_state).",
+      "misconception": "DP is memoization: problem-state -> computed answer (the same shape as Clone Graph's original-node -> copied-node). Nail the state definition first — a wrong state makes the recurrence impossible. Decide count vs min/max vs boolean early; it changes the combine step.",
+      "mental_model": "If you've solved this smaller state before, reuse it. Clone Graph mapped node->copy; DP maps state->answer."
+    },
+    "dp_2d": {
+      "signal": "Two changing dimensions: two strings/sequences (LCS, edit distance), a grid (unique paths), or item-index + capacity (knapsack/coin-change-II).",
+      "key_question": "What do the TWO indices of the state mean, and what smaller (i-1, j) / (i, j-1) / (i-1, j-1) states does dp[i][j] depend on?",
+      "state": "dp[i][j] = answer for the subproblem using the first i of one dimension and first j of the other.",
+      "template": "dp = grid of base values (row 0 / col 0)\nfor i in 1..m:\n  for j in 1..n:\n    dp[i][j] = combine(dp[i-1][j], dp[i][j-1], dp[i-1][j-1], current)\nreturn dp[m][n]",
+      "complexity": "O(m*n) states, each O(1) work typically.",
+      "misconception": "Get the base row/column and the direction of dependency right before filling — dp[i][j] must only read already-computed cells. Many 2D DPs compress to O(n) space by keeping just the previous row, but learn the full table first.",
+      "mental_model": "A grid where each cell is answered from its already-filled up/left/diagonal neighbors."
+    },
+    "hashing": {
+      "signal": "'Have I seen this before?', 'how many times?', complements (two-sum), grouping, dedup, O(1) lookup to replace a nested scan.",
+      "key_question": "Do I need existence (set), counts (map to int), or a location (map to index)?",
+      "state": "A set or dictionary keyed by the value/signature you're tracking.",
+      "template": "seen = {}\nfor i, x in enumerate(nums):\n  if target - x in seen: return [seen[target-x], i]\n  seen[x] = i",
+      "complexity": "O(n) with average O(1) lookups.",
+      "misconception": "A set only tracks EXISTENCE ('have I seen it?'). Use a map when duplicates/counts matter, or when you need WHERE you saw it (two-sum needs the index, not just presence).",
+      "mental_model": "A hash map is a magic notebook: write 'value -> where/how-many' and flip to any page instantly."
+    },
+    "two_pointers": {
+      "signal": "A sorted array where you need a pair/triplet with a target relation, a palindrome check, in-place partitioning, or comparing/merging from both ends. Two indices moving toward or with each other.",
+      "key_question": "Which pointer must move, and which must stay? What condition tells me to move each one?",
+      "state": "Two indices (left/right, or slow/fast), and the invariant that decides which to advance.",
+      "template": "# opposite ends on a sorted array (e.g. two-sum II):\nl, r = 0, n-1\nwhile l < r:\n  s = nums[l] + nums[r]\n  if s == target: return [l, r]\n  elif s < target: l += 1     # need bigger -> move left up\n  else: r -= 1                 # need smaller -> move right down",
+      "complexity": "O(n) — the two pointers sweep the array once (O(n log n) if you must sort first).",
+      "misconception": "Two pointers usually needs SORTED input to justify moving a pointer based on a comparison — the sort is what makes 'move left up to get bigger' valid. On unequal-length structures you can sometimes equalize distance by making each pointer traverse both paths (linked-list intersection).",
+      "mental_model": "Each comparison lets you discard one candidate from an end, so you never re-check pairs — that's why it beats the O(n^2) nested loop."
+    },
+    "arrays": {
+      "signal": "The most basic container — indexed elements. Almost every other pattern (two pointers, sliding window, prefix sum, binary search) is built on top of it.",
+      "key_question": "What is the SHAPE of the query? Range sums? A contiguous window? A sorted/monotonic search? A pair? The shape picks the pattern.",
+      "state": "Usually indices and a running aggregate; the specific state comes from whichever pattern the shape implies.",
+      "template": "# the meta-move: classify the array query, THEN pick the tool\n# range sums (repeated)      -> prefix sum\n# range updates (repeated)   -> difference array\n# contiguous subarray/window -> sliding window\n# sorted / monotonic         -> binary search\n# pair with a relation       -> two pointers / hashing",
+      "complexity": "Access O(1); a single scan O(n); nested scans O(n^2) — the goal is usually to replace a nested scan with a smarter pass.",
+      "misconception": "Don't jump to a nested loop. First name the SHAPE of the query — the right pattern usually turns an O(n^2) brute force into O(n) or O(n log n).",
+      "mental_model": "Arrays are the board every other pattern plays on. Read the query shape first, reach for the tool second."
+    },
+    "stack_queue": {
+      "signal": "LIFO 'most recent / matching / nesting' work (valid parentheses, undo, next-greater) -> stack. FIFO 'process in arrival order / level by level' -> queue.",
+      "key_question": "Do I resolve the MOST RECENT unfinished thing (stack) or the OLDEST waiting thing (queue)?",
+      "state": "A stack (append/pop the end) or a queue (append end, pop front).",
+      "template": "# stack: matching parentheses\nstack=[]\nfor ch in s:\n  if ch is opener: stack.append(ch)\n  else:\n    if not stack or not matches(stack.pop(), ch): return False\nreturn not stack\n# queue underpins BFS (process in arrival order)",
+      "complexity": "O(1) push/pop; O(n) to process a sequence.",
+      "misconception": "Reach for a stack whenever the problem is about the MOST RECENT unmatched/greater/nested item — that recency is the tell. A queue is the engine under BFS (level-by-level = arrival order).",
+      "mental_model": "Stack = a pile of plates (last on, first off). Queue = a line of people (first in, first out)."
+    },
+    "matrix": {
+      "signal": "A 2D grid where cells relate to their neighbors — often secretly a graph (islands, flood fill, shortest path in a grid).",
+      "key_question": "Is this actually a graph? What counts as a valid neighbor (4-dir or 8-dir)?",
+      "state": "The grid itself (mutated as visited) or a separate visited set; a direction-offsets list.",
+      "template": "dirs = [(1,0),(-1,0),(0,1),(0,-1)]\ndef dfs(r,c):\n  if out of bounds or invalid: return\n  mark visited\n  for dr,dc in dirs: dfs(r+dr, c+dc)",
+      "complexity": "O(m*n) — each cell visited at most once.",
+      "misconception": "The traversal skeleton usually stays identical; only the neighbor definition changes. Mutating visited land into a blocker lets 'blocked' and 'visited' be one check.",
+      "mental_model": "Grid = graph with implicit edges from coordinate offsets."
+    },
+    "bst": {
+      "signal": "A Binary SEARCH Tree — search/insert/delete by value, validate, kth-smallest, lowest common ancestor, or anything that wants sorted order. The BST property: entire left subtree < node < entire right subtree.",
+      "key_question": "What ordering guarantee can I exploit? For each node, which whole subtree can I eliminate?",
+      "state": "The current node; for delete/insert, reconnect the returned subtree to the parent's child pointer. For kth-smallest, a shared counter across recursion.",
+      "template": "# search / insert reuse the same 'go left or right' pruning:\ndef search(node, target):\n  if not node or node.val==target: return node\n  return search(node.left,target) if target<node.val else search(node.right,target)\ndef insert(node, val):\n  if not node: return Node(val)\n  if val<node.val: node.left=insert(node.left,val)\n  else: node.right=insert(node.right,val)\n  return node\n# validate with an inherited (low,high) range:\ndef valid(node, low, high):\n  if not node: return True\n  if not (low < node.val < high): return False\n  return valid(node.left,low,node.val) and valid(node.right,node.val,high)",
+      "complexity": "O(h) per op where h is height — O(log n) balanced, O(n) worst-case (degenerate/skewed).",
+      "misconception": "Validate is NOT just 'left child < node < right child' — the ENTIRE left subtree must be < node and the entire right > node, enforced with an inherited (low,high) range. For delete with two children, replace with the inorder SUCCESSOR (leftmost of the right subtree), not just a child — then delete the duplicate. Inorder traversal is sorted ONLY for a BST.",
+      "mental_model": "Binary search inside a tree: compare, eliminate the impossible subtree, recurse. Each node lives inside an allowed value range inherited from its ancestors."
+    },
+    "tries": {
+      "signal": "Prefix queries over many strings: autocomplete, 'starts-with', word search on a board, dictionary lookups where shared prefixes should be shared.",
+      "key_question": "Do many strings share prefixes I can store ONCE instead of repeating per word?",
+      "state": "A tree of nodes, each with children keyed by character and an is_end flag marking a complete word.",
+      "template": "class Node: children={}; is_end=False\ndef insert(root, word):\n  cur=root\n  for ch in word:\n    cur=cur.children.setdefault(ch, Node())\n  cur.is_end=True\ndef search(root, word, prefix_only=False):\n  cur=root\n  for ch in word:\n    if ch not in cur.children: return False\n    cur=cur.children[ch]\n  return True if prefix_only else cur.is_end",
+      "complexity": "O(L) per insert/search where L is the word length — independent of how many words are stored.",
+      "misconception": "The is_end flag is essential: without it 'app' would look present just because 'apple' was inserted. search() vs startsWith() differ ONLY in whether you check is_end at the end.",
+      "mental_model": "A shared spelling tree: every word is a path from the root; common prefixes are one shared path, so lookups cost the word length, not the dictionary size."
+    },
+    "union_find": {
+      "signal": "Grouping / connectivity: 'are these two connected?', count connected components as edges are added, detect a cycle in an undirected graph, merge accounts/sets dynamically.",
+      "key_question": "Which group does each element belong to, and can I merge two groups fast?",
+      "state": "A parent array (each element points toward its group's root) and optionally a rank/size array for balanced unions.",
+      "template": "parent=list(range(n))\ndef find(x):\n  while parent[x]!=x:\n    parent[x]=parent[parent[x]]   # path compression\n    x=parent[x]\n  return x\ndef union(a,b):\n  ra,rb=find(a),find(b)\n  if ra==rb: return False   # already connected (a cycle if this was a new edge)\n  parent[ra]=rb\n  return True",
+      "complexity": "Nearly O(1) amortized per op (inverse-Ackermann) with path compression + union by rank.",
+      "misconception": "Always union the ROOTS (find(a), find(b)), never the raw elements. If union() finds two nodes already share a root, connecting them would form a cycle — that's how you detect one. Path compression is what keeps it fast; don't skip it.",
+      "mental_model": "Every element points up toward its group's 'captain' (root); union makes one captain report to the other; find follows the chain to the top."
+    },
+    "bit_manipulation": {
+      "signal": "Single-number / XOR tricks, counting set bits, subsets via bitmasks, power-of-two checks, or when the constraint hints at O(1) space over a fixed number of bits.",
+      "key_question": "Can I represent the state in bits and use AND/OR/XOR/shift instead of extra data structures?",
+      "state": "Usually just an integer accumulator; for subset enumeration, a bitmask 0..(2^n - 1).",
+      "template": "# XOR cancels pairs -> the lone single number survives:\nres=0\nfor x in nums: res ^= x\nreturn res\n# handy ops:\n# x & 1        -> lowest bit (odd?)\n# x >> 1       -> divide by 2\n# x & (x-1)    -> clears the lowest set bit (count bits by looping this)\n# x & -x       -> isolates the lowest set bit\n# (n & (n-1))==0 -> n is a power of two (n>0)",
+      "complexity": "O(1) per bit op; O(n) over an array; O(bits) to count set bits.",
+      "misconception": "XOR's superpower: a ^ a == 0 and a ^ 0 == a, so XOR-ing everything cancels all pairs and leaves the unique element — no hash set needed. 'x & (x-1)' clearing the lowest set bit is the trick behind fast bit-counting.",
+      "mental_model": "Numbers are just rows of on/off switches; bitwise ops flip and mask whole rows at once, O(1)."
+    }
+  }
+}

@@ -9,7 +9,7 @@ voices them, never invents):
     {
         "name":   "LeetCode Grind Channel",          # headline
         "what":   "daily problem + full breakdown",  # one plain line
-        "how":    "post drops daily; /leetcode <n>", # how to access it
+        "how":    "post drops daily; /leetcode problem <n>", # how to access it
     }
 
 The AI turns the whole list into a title + intro + one blurb per feature + outro,
@@ -83,11 +83,14 @@ def announcement_embed(data):
     )
     for f in data.get("features", [])[:12]:
         name = f.get("name") or "New"
-        blurb = f.get("blurb") or ""
-        how = f.get("how") or ""
+        blurb = (f.get("blurb") or f.get("what") or "").strip()
+        how = (f.get("how") or "").strip()
         val = blurb[:900]
         if how:
             val += f"\n\n**▶ How:** {how[:300]}"
+        val = val.strip()
+        if not val:
+            continue  # skip a feature the model returned empty (Discord rejects blank fields)
         embed.add_field(name=f"✨ {name}", value=val[:1024], inline=False)
     if data.get("outro"):
         embed.set_footer(text=data["outro"][:200])
@@ -123,9 +126,35 @@ PENDING_CHANGELOG = [
         "pattern, why it works, and edge cases — then gives you THREE full "
         "solutions (brute force → better → optimal, with the best one clearly "
         "marked) and buttons to flip between each one's complete code.",
-        "how": "Auto-posts daily in the LeetCode channel. Use /leetcode "
+        "how": "Auto-posts daily in the LeetCode channel. Use /leetcode problem "
         "<number|name|daily> for any problem on demand. React with the check mark "
-        "when you solve one, then /streak to see your solve streak.",
+        "when you solve one, then /leetcode streak to see your solve streak.",
+    },
+    {
+        "name": "Full LeetCode Prep Toolkit",
+        "what": "A whole set of new commands to actually train, not just read: pull "
+        "a random problem, get the top problems a specific company asks, have Silver "
+        "Wolf teach you a technique from scratch, get spoiler-free hints, run a timed "
+        "mock assessment under real pressure, compete on a server leaderboard, paste "
+        "your own code to find out why it's slow or buggy, see which patterns you "
+        "keep failing, and get problems resurfaced for spaced-repetition review so "
+        "they actually stick.",
+        "how": "All under the /leetcode command now: /leetcode random, /leetcode "
+        "company <name>, /leetcode pattern <technique>, /leetcode hint <problem>, "
+        "/leetcode mock, /leetcode leaderboard, /leetcode explaincode <your code>, "
+        "/leetcode weakspots, and /leetcode review.",
+    },
+    {
+        "name": "DS&A Learning Roadmap",
+        "what": "A full guided curriculum for the data structures and algorithm "
+        "patterns that show up in interviews — arrays, hashing, linked lists, two "
+        "pointers, sliding window, prefix sum, binary search, trees, BFS/DFS, "
+        "graphs, heaps, greedy, DP, and more. Silver Wolf teaches each one from "
+        "scratch with practice problems, you check them off as you learn, and the "
+        "roadmap tracks what's next. The daily problem now also shows which pattern "
+        "it trains and links you straight to the lesson.",
+        "how": "/leetcode roadmap to see your path and progress; /leetcode learn "
+        "<pattern> to study one; the daily post links the pattern it uses.",
     },
     {
         "name": "Smart Match Alerts",
@@ -150,11 +179,14 @@ PENDING_CHANGELOG = [
         "how": "Check the new grad channel — the roles are landing there now.",
     },
     {
-        "name": "Faster, Sharper Match Scoring",
-        "what": "The match score got an animated progress readout so you're not "
-        "staring at a blank screen, plus a Jump-to-posting button so the result no "
-        "longer makes you scroll. Scoring is also more honest now — it caps the "
-        "score when a required skill is missing instead of overrating a resume.",
+        "name": "Way Faster, Sharper Match Scoring",
+        "what": "Match scoring got a major rebuild — it's now roughly ten times "
+        "faster, and it shows your score, tier, and breakdown the moment they're "
+        "ready (in about two seconds) while it finishes writing up the full read. A "
+        "real progress bar tracks it, and a Jump-to-posting button gets you back to "
+        "the role. It's also more accurate and consistent: the same resume and job "
+        "give the same score every time, and a missing required skill caps the "
+        "score instead of over-rating you.",
         "how": "Click Score on any posting, or use /match.",
     },
     {
@@ -167,10 +199,22 @@ PENDING_CHANGELOG = [
     },
     {
         "name": "Under-the-Hood Tune-Up",
-        "what": "Trimmed the bot's memory footprint and fixed the crashes that were "
-        "causing occasional downtime, so it stays up and responsive instead of "
-        "falling over when things get busy.",
-        "how": "Nothing to do — the bot's just more stable now.",
+        "what": "Trimmed the bot's memory footprint, fixed the crashes that caused "
+        "occasional downtime, and made the AI far more resilient under load — it now "
+        "smooths out bursts and spreads work so scoring and tailoring don't choke "
+        "when a lot of people use them at once. It stays up and responsive instead "
+        "of falling over when things get busy.",
+        "how": "Nothing to do — the bot's just faster and more stable now.",
+    },
+    {
+        "name": "Cleaner Command Menu",
+        "what": "The command list was getting huge, so everything LeetCode is now "
+        "tucked under one /leetcode command instead of a dozen separate ones — start "
+        "typing /leetcode and pick what you want. Same tools, way less clutter. "
+        "Roles outside the US are also filtered out now, so the feed stays relevant.",
+        "how": "Type /leetcode and Discord shows all the options (problem, learn, "
+        "roadmap, random, mock, streak, and more). Old names like /streak or /random "
+        "are now /leetcode streak, /leetcode random, etc.",
     },
 ]
 

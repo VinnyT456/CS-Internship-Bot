@@ -275,3 +275,242 @@ def _approaches_are_clean(approaches):
         if not _code_is_clean(code):
             return False
     return True
+
+
+# --- /pattern & /learn : teach a technique the "shape-first" way -------------
+# Teaching methodology distilled from the user's own learning notes
+# (leetcode-data-structures-learning-patterns.md). The philosophy: DON'T memorize
+# solutions — teach the student to ask what information the problem needs, what the
+# INPUT SHAPE gives them, and what STATE to track. Name pattern → state → return →
+# complexity BEFORE any code. Teach by questions, correct misconceptions into
+# general rules, trace a tiny concrete example before abstracting.
+_TEACH_METHOD = """\
+TEACHING METHODOLOGY (follow this — it's how this student actually learns):
+- SHAPE FIRST. Start from the INPUT SHAPE and the SIGNAL that points at this
+  pattern (sorted array? contiguous subarray/substring? pair-sum? levels? cycle?
+  many range updates? overlapping subproblems?). Recognition is the real skill —
+  in an interview they must pick the abstraction under pressure, not recall a title.
+- TEACH BY QUESTIONS, not lectures. Frame the core idea as the question the pattern
+  answers ("what makes this window valid?", "what should this recursive call return
+  to its parent?", "what does 'visited' mean HERE?", "what condition lets binary
+  search throw away half?", "which pointer moves and which stays?").
+- NAME THE PARTS before code: the STATE to track, the RETURN value (for recursion),
+  and WHY the COMPLEXITY is acceptable ("each node/cell processed once → linear").
+- TRACE A TINY CONCRETE EXAMPLE with small real numbers before any abstraction.
+- CORRECT THE COMMON MISCONCEPTION into a general rule (e.g. "a set only says 'seen
+  it'; a map also says 'where's the copy'"; "inorder is sorted ONLY for a BST";
+  "shortest window records while valid then shrinks — not just longest with min").
+- Keep the transferable habit front and center: before coding, name the pattern,
+  name the state, name the return, explain the complexity."""
+
+
+def _knowledge_block(knowledge):
+    """Format doc-grounded pattern facts as a GROUND-TRUTH block for the prompt, so
+    the lesson's signal/state/template/complexity/misconception come from the
+    student's own notes — not the model's drifty general recall."""
+    if not isinstance(knowledge, dict) or not knowledge:
+        return ""
+    parts = ["\nGROUND TRUTH for THIS pattern (from the student's own study notes — "
+             "your lesson MUST stay faithful to these facts; voice them in your "
+             "style, don't contradict or omit them):"]
+    labels = [
+        ("signal", "SIGNAL / when to reach for it"),
+        ("key_question", "THE key question"),
+        ("state", "STATE to track"),
+        ("template", "TEMPLATE (reusable skeleton)"),
+        ("complexity", "COMPLEXITY"),
+        ("misconception", "COMMON MISCONCEPTION → the rule"),
+        ("mental_model", "MENTAL MODEL"),
+    ]
+    for key, label in labels:
+        val = knowledge.get(key)
+        if val:
+            parts.append(f"- {label}: {val}")
+    return "\n".join(parts) + "\n"
+
+
+def explain_pattern(name, knowledge=None):
+    """Silver Wolf lesson on a LeetCode technique (two pointers, sliding window,
+    DP, …), taught SHAPE-FIRST per the student's own methodology. When `knowledge`
+    (a doc-grounded facts dict from leetcode_api.pattern_knowledge) is supplied, the
+    lesson is anchored to those exact facts instead of the model's general recall.
+    Returns a dict (name, intro, what, when, how, state, complexity, misconception,
+    template, questions[], outro) or None."""
+    if not name or not name.strip():
+        return None
+    prompt = f"""{_PERSONA}
+
+You're teaching a CS student one LeetCode TECHNIQUE / PATTERN so they can RECOGNIZE
+and use it in interviews. Explain it beginner-clear (ELI5).
+
+STAY IN CHARACTER — this is the important part: you are SILVER WOLF the whole way
+through, not a neutral tutor. Every prose field (intro, when, what, how, state,
+misconception, questions, outro) is written in HER voice: cocky, deadpan, teasing,
+secretly fully on the student's side, gamer/hacker framing (loadout, gear, boss,
+raid, exploit, patch the build, "秒了"). The facts and the FACTS-vs-VOICE split work
+exactly like her résumé feedback: the technical facts stay 100% accurate, the
+PERSONALITY lives in the wording. Do NOT flatten into a dry textbook to be
+"accurate" — be accurate AND unmistakably her. Density dial: about one game/hacker
+beat every 2-3 sentences (not every line), the rest plain and clear — same natural
+balance she uses everywhere else. A lesson that reads like a neutral tutorial is
+WRONG even if the facts are right.
+
+{_TEACH_METHOD}
+{_knowledge_block(knowledge)}
+
+Return STRICT JSON (no markdown, no extra keys):
+{{
+  "name": "canonical pattern name, cleaned up (e.g. 'Two Pointers', 'Sliding Window')",
+  "intro": "1-2 sentence Silver Wolf opener framing this as gear to add to their kit.",
+  "when": "3-5 sentences — THE RECOGNITION SKILL: the input shape + signal words that \
+should make them reach for this pattern. Lead with this; it's the most important part.",
+  "what": "3-5 sentences: what the technique IS, with a plain everyday analogy and a \
+tiny concrete example using small real numbers. Define any term the first time.",
+  "how": "4-7 sentences: how it works, step by step, plain words. Trace the tiny \
+example through it.",
+  "state": "1-3 sentences: the exact STATE to track (e.g. 'left/right pointers + a \
+frequency map of the window'; 'prev, curr, next'; 'a visited set'; 'running prefix \
++ a set of seen prefixes'). Naming the state is half the battle.",
+  "complexity": "1-2 sentences: the time/space and WHY, in the 'each X processed once \
+→ ...' style (e.g. 'each pointer only moves forward → O(n)').",
+  "misconception": "1-2 sentences: the classic mistake with this pattern, corrected \
+into a general rule.",
+  "questions": ["2-4 short SELF-CHECK questions the student should ask themselves when \
+they see a problem like this (e.g. 'What makes my window valid?', 'What does this \
+recursive call return?')"],
+  "template": "A short, LANGUAGE-AGNOSTIC pseudocode skeleton of the pattern (5-15 \
+lines) — the reusable shape, not a specific problem's full solution. Plain steps.",
+  "outro": "1 sentence encouraging sign-off."
+}}
+Correctness AND character together: the signal, state, template, and complexity must \
+be accurate for this pattern, AND every prose field must sound like Silver Wolf (see \
+the STAY IN CHARACTER note above). Accurate but voiceless is a fail; keep both.
+
+--- TECHNIQUE ---
+{name.strip()}
+--- END ---
+
+Now return the JSON."""
+    data = gemma_client.ask_json_text(
+        prompt, max_output_tokens=2600, temperature=0.5, chain=FAST_CHAIN
+    )
+    if not data:
+        return None
+    # Core teaching fields must be present; if the model dropped one (occasional
+    # JSON slip), retry once for a complete lesson.
+    if not (data.get("when") and data.get("how") and data.get("what")):
+        retry = gemma_client.ask_json_text(
+            prompt + "\n\nIMPORTANT: include ALL fields — especially when, what, and "
+            "how must be non-empty.",
+            max_output_tokens=2600, temperature=0.4, chain=FAST_CHAIN,
+        )
+        if retry and retry.get("when") and retry.get("how") and retry.get("what"):
+            data = retry
+    q = data.get("questions")
+    if isinstance(q, str):
+        data["questions"] = [q]
+    elif not isinstance(q, list):
+        data["questions"] = []
+    return data
+
+
+# --- /explaincode : debug the user's own attempt -----------------------------
+def explain_user_code(code, problem=None):
+    """Silver Wolf reviews the USER'S code: what it does, is it correct, what's its
+    complexity, why it's slow/buggy, and the concrete fix — WITHOUT just handing
+    over a full rewrite. Returns a dict or None."""
+    if not code or not code.strip():
+        return None
+    ctx = ""
+    if problem and problem.get("title"):
+        ctx = (
+            f"\nThe problem they're solving:\nTitle: {problem.get('title')}\n"
+            f"{_clip(problem.get('content'), 1500)}\n"
+        )
+    prompt = f"""{_PERSONA}
+
+A student pasted THEIR OWN code below. Review it like a sharp, kind mentor: tell them \
+what it does, whether it's correct, its time/space complexity, WHERE it's slow or \
+buggy, and the concrete fix — teach them, don't just dump a full rewrite. ELI5 the \
+reasoning, keep your voice, be honest but encouraging.
+
+Return STRICT JSON (no markdown, no extra keys):
+{{
+  "verdict": "1 short line: does it work / is it optimal? (e.g. 'Works, but O(n^2) — \
+can be O(n).', 'Bug on empty input.', 'Clean and optimal.')",
+  "what_it_does": "2-4 sentences, plain: walk through what their code actually does.",
+  "complexity": "Time + space of THEIR code, e.g. 'Time O(n^2), Space O(1)', with a \
+one-clause why.",
+  "issues": ["1-4 concrete problems: a bug, a slow part, an edge case they miss. Each \
+short and specific. Empty list if genuinely clean."],
+  "fix": "2-5 sentences: the key change(s) to make it correct/faster, described so \
+they can implement it themselves. Name the better pattern if relevant. A tiny code \
+snippet is OK here, but NOT a full rewrite.",
+  "encouragement": "1 short Silver Wolf sign-off."
+}}
+Be technically correct above all. If the code is already good, say so plainly.
+{ctx}
+--- THEIR CODE ---
+{_clip(code, 4000)}
+--- END ---
+
+Now return the JSON."""
+    data = gemma_client.ask_json_text(
+        prompt, max_output_tokens=1600, temperature=0.3, chain=FAST_CHAIN
+    )
+    if not data:
+        return None
+    iss = data.get("issues")
+    if isinstance(iss, str):
+        data["issues"] = [iss]
+    elif not isinstance(iss, list):
+        data["issues"] = []
+    return data
+
+
+# --- /hint : progressive hint ladder, NO solution ----------------------------
+def hint_ladder(problem):
+    """Three escalating hints for a problem — nudge → pattern name → concrete first
+    step — WITHOUT giving the solution. Returns {hints: [..]} or None."""
+    if not problem or not problem.get("title"):
+        return None
+    official = problem.get("hints") or []
+    official_block = "\n".join(f"- {_clip(h, 300)}" for h in official[:4]) or "(none)"
+    prompt = f"""{_PERSONA}
+
+Give a student a LADDER of exactly 3 hints for this problem, escalating, so they can \
+solve it THEMSELVES. Do NOT reveal the full solution or give code. Voice stays, but \
+teaching-first.
+
+Return STRICT JSON (no markdown, no extra keys):
+{{
+  "hints": [
+    "Hint 1 — the gentlest nudge: reframe the problem or point at what to notice. No \
+technique named yet.",
+    "Hint 2 — name the PATTERN/technique to reach for and why it fits here.",
+    "Hint 3 — the concrete first step / key insight to start coding, still stopping \
+short of the full answer."
+  ]
+}}
+Each hint 1-3 sentences. Never include the final solution or code.
+
+--- PROBLEM ---
+Title: {problem.get('title')}
+{_clip(problem.get('content'), 2500)}
+
+Official hints (reference — rephrase, escalate, don't quote):
+{official_block}
+--- END ---
+
+Now return the JSON."""
+    data = gemma_client.ask_json_text(
+        prompt, max_output_tokens=1000, temperature=0.5, chain=FAST_CHAIN
+    )
+    if not data:
+        return None
+    h = data.get("hints")
+    if isinstance(h, str):
+        data["hints"] = [h]
+    elif not isinstance(h, list):
+        data["hints"] = []
+    return data

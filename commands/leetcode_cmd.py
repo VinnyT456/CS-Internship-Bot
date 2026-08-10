@@ -33,6 +33,22 @@ _DIFF_COLOR = {
 _DIFF_EMOJI = {"Easy": "🟢", "Medium": "🟡", "Hard": "🔴"}
 SOLVE_EMOJI = "✅"
 
+
+def _problem_list_lines(rows, limit=15):
+    """Format light problem rows (from the API list endpoints or slug lists) into
+    embed lines: difficulty dot + linked title. Truncates to `limit`."""
+    out = []
+    for r in rows[:limit]:
+        dm = _DIFF_EMOJI.get(r.get("difficulty"), "⚪")
+        title = r.get("title") or r.get("slug") or "?"
+        url = r.get("url") or (
+            f"https://leetcode.com/problems/{r.get('slug')}/" if r.get("slug") else None
+        )
+        num = r.get("id")
+        head = f"#{num} " if num else ""
+        out.append(f"{dm} [{head}{title}]({url})" if url else f"{dm} {head}{title}")
+    return "\n".join(out) or "_none found_"
+
 # Small Silver Wolf avatar for the embed author line (data-free URL — Discord
 # hotlinks it; falls back gracefully if unreachable).
 _SW_ICON = (
@@ -166,6 +182,17 @@ def build_daily_embed(problem, *, daily=True):
         embed.add_field(
             name="🏷️ Topics",
             value=" · ".join(f"`{t}`" for t in tags[:6]),
+            inline=False,
+        )
+
+    # --- roadmap tie-in: which DS&A patterns this problem trains + how to learn ---
+    learn = leetcode_api.roadmap_patterns_for_tags(tags)
+    if learn:
+        picks = learn[:3]
+        val = " · ".join(f"**{name}** (`/leetcode learn {key.replace('_', ' ')}`)" for key, name in picks)
+        embed.add_field(
+            name="📚 Learn the pattern",
+            value=val[:1024],
             inline=False,
         )
 
@@ -379,6 +406,37 @@ def _code_chunks(code, first_budget, rest_budget=3900):
     return chunks or [""]
 
 
+class _LearnView(discord.ui.View):
+    """A single '✅ Mark as learned' button under a /learn lesson. Ephemeral +
+    short-lived, so it holds the pattern key directly (no persistence needed)."""
+
+    def __init__(self, pattern_key, pattern_name, get_db):
+        super().__init__(timeout=900)
+        self.pattern_key = pattern_key
+        self.pattern_name = pattern_name
+        self.get_db = get_db
+        btn = discord.ui.Button(
+            label="✅ Mark as learned", style=discord.ButtonStyle.success
+        )
+        btn.callback = self._on_learned
+        self.add_item(btn)
+
+    async def _on_learned(self, interaction: discord.Interaction):
+        db = self.get_db()
+        u = interaction.user
+        uid = await asyncio.to_thread(
+            db.get_or_create_user, u.id, u.name, u.display_name
+        )
+        if uid:
+            await asyncio.to_thread(db.mark_pattern_learned, uid, self.pattern_key)
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(
+            content=f"🐺 **{self.pattern_name}** logged. One more patched into your kit — check `/leetcode roadmap`.",
+            view=self,
+        )
+
+
 class ApproachView(discord.ui.View):
     """Ephemeral view with one button per approach — flips the code embed in place.
     The optimal one is a green (success) button; others are secondary. Stateless
@@ -553,11 +611,62 @@ async def handle_solve_react(bot, payload, get_db, *, added):
     )
     if not user_uuid:
         return True
-    if added:
-        await asyncio.to_thread(db.mark_leetcode_solved, user_uuid, slug, difficulty)
-    else:
+    if not added:
         await asyncio.to_thread(db.unmark_leetcode_solved, user_uuid, slug)
+        return True
+
+    # Solved: schedule a spaced-repetition review (+3 days) and capture topics for
+    # /weakspots. Topics come from the problem's tags (fetched once, best effort).
+    from datetime import datetime, timezone, timedelta
+
+    review_at = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    topics = None
+    try:
+        prob = await asyncio.to_thread(leetcode_api.get_problem, slug)
+        if prob and prob.get("tags"):
+            topics = ",".join(prob["tags"])
+    except Exception:
+        pass
+    await asyncio.to_thread(
+        db.mark_leetcode_solved, user_uuid, slug, difficulty,
+        "solved", topics, review_at,
+    )
+
+    # Streak milestone: DM a little Silver Wolf hype at 3/7/14/30/50/100-day marks.
+    try:
+        await _maybe_milestone_dm(bot, db, user_uuid, member)
+    except Exception:
+        logger.exception("leetcode: milestone DM failed")
     return True
+
+
+_STREAK_MILESTONES = {3, 7, 14, 30, 50, 100, 200, 365}
+
+
+async def _maybe_milestone_dm(bot, db, user_uuid, member):
+    """If the user's current solve streak just hit a milestone, DM them. Best
+    effort — a DM failure (closed DMs) is swallowed."""
+    solves = await asyncio.to_thread(db.get_leetcode_solves, user_uuid)
+    streak = _consecutive_day_streak(solves)
+    if streak not in _STREAK_MILESTONES:
+        return
+    line = {
+        3: "3-day streak. Warming up — don't let it drop now.",
+        7: "7 days straight. A full week cleared. 隐藏分 climbing.",
+        14: "Two weeks. This is a real grind now, not a fluke.",
+        30: "30-DAY STREAK. Month-long run. That's T0 discipline. 秒了.",
+        50: "50 days. Most people quit by now. You're built different.",
+        100: "💯 100 DAYS. Certified no-lifer (respect). This is elite.",
+        200: "200 days. At this point the leetcode boss fears YOU.",
+        365: "A FULL YEAR. 我独自满级. Absolute legend status.",
+    }.get(streak, f"{streak}-day streak!")
+    try:
+        user = member if hasattr(member, "send") else await bot.fetch_user(
+            getattr(member, "id", member)
+        )
+        await user.send(f"🔥 **{line}**\n— Silver Wolf")
+    except Exception:
+        pass
 
 
 def _slug_from_message(msg):
@@ -582,11 +691,16 @@ def _difficulty_from_message(msg):
 
 # --- slash commands -----------------------------------------------------------
 def register(bot, *, get_db, logger=None):
-    """Register /leetcode <query> and /streak."""
+    """Register the /leetcode command group — all LeetCode + DS&A learning tools
+    live under one group (/leetcode <subcommand>) to keep the top-level list clean."""
     log = logger or logging.getLogger("cs_internship_bot")
 
-    @bot.tree.command(
-        name="leetcode",
+    group = discord.app_commands.Group(
+        name="leetcode", description="LeetCode practice, learning, and stats"
+    )
+
+    @group.command(
+        name="problem",
         description="Get a Silver Wolf breakdown of any LeetCode problem",
     )
     @discord.app_commands.describe(
@@ -621,7 +735,7 @@ def register(bot, *, get_db, logger=None):
         await interaction.followup.send(embed=overview, ephemeral=True)
         await _reveal_for(problem, interaction)
 
-    @bot.tree.command(
+    @group.command(
         name="streak", description="Your LeetCode solve streak in the grind channel"
     )
     async def streak_cmd(interaction: discord.Interaction):
@@ -666,8 +780,8 @@ def register(bot, *, get_db, logger=None):
             embed.set_footer(text="Keep the run going. 我带你.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @bot.tree.command(
-        name="testleetcode",
+    @group.command(
+        name="preview",
         description="(Test) Preview the LeetCode embed UI — daily card + reveal",
     )
     @discord.app_commands.describe(
@@ -754,7 +868,621 @@ def register(bot, *, get_db, logger=None):
                         view=ApproachView(problem, ex), ephemeral=True,
                     )
 
-    log.info("Registered /leetcode, /streak, /testleetcode")
+    # ---------------- /random ----------------
+    _DIFF_CHOICES = [
+        discord.app_commands.Choice(name="Easy", value="easy"),
+        discord.app_commands.Choice(name="Medium", value="medium"),
+        discord.app_commands.Choice(name="Hard", value="hard"),
+    ]
+
+    @group.command(
+        name="random", description="Grab a random LeetCode problem to grind"
+    )
+    @discord.app_commands.describe(
+        difficulty="Filter by difficulty (optional)",
+        topic="Filter by topic slug, e.g. two-pointers, dynamic-programming (optional)",
+    )
+    @discord.app_commands.choices(difficulty=_DIFF_CHOICES)
+    async def random_cmd(
+        interaction: discord.Interaction,
+        difficulty: discord.app_commands.Choice[str] = None,
+        topic: str = None,
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        diff = difficulty.value if difficulty else None
+        tag = topic.strip().lower().replace(" ", "-") if topic else None
+        problem = await asyncio.to_thread(leetcode_api.random_problem, diff, tag)
+        if not problem:
+            await interaction.followup.send(
+                "Couldn't roll a problem with those filters. Try loosening them.",
+                ephemeral=True,
+            )
+            return
+        card = build_daily_embed(problem, daily=False)
+        view = RevealView(problem["slug"])
+        if problem.get("url"):
+            view.add_item(discord.ui.Button(
+                label="Open on LeetCode", style=discord.ButtonStyle.link,
+                url=problem["url"],
+            ))
+        await interaction.followup.send(
+            content="🎲 Rolled you a problem:", embed=card, view=view, ephemeral=True
+        )
+
+    # ---------------- /company ----------------
+    @group.command(
+        name="company",
+        description="Top LeetCode problems a company is known to ask",
+    )
+    @discord.app_commands.describe(name="Company name, e.g. Google, Amazon, Bloomberg")
+    async def company_cmd(interaction: discord.Interaction, name: str):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        slugs = await asyncio.to_thread(leetcode_api.problems_for_company, name, 15)
+        if not slugs:
+            await interaction.followup.send(
+                f"No problem data for **{name}**. Try a big-tech name (Google, "
+                "Amazon, Meta, Microsoft, Bloomberg…).",
+                ephemeral=True,
+            )
+            return
+        # Build rows straight from the (frequency-ranked) slugs — no per-problem
+        # HTTP fetch. Title is derived from the slug and each links to LeetCode; the
+        # ranking is the signal here, and 15 serial /problem fetches would just add
+        # seconds of latency for a difficulty dot we don't need.
+        rows = [
+            {"title": s.replace("-", " ").title(), "slug": s}
+            for s in slugs
+        ]
+        embed = discord.Embed(
+            title=f"🏢 {name.title()} · Top Asked Problems",
+            description=_problem_list_lines(rows, limit=15),
+            color=discord.Color.blurple(),
+        )
+        embed.set_author(name="LeetCode · Company Prep", icon_url=_SW_ICON)
+        embed.set_footer(text="🐺 Frequency-ranked from interview reports. Grind the top ones first.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---------------- /pattern ----------------
+    @group.command(
+        name="pattern",
+        description="Silver Wolf explains a LeetCode technique + example problems",
+    )
+    @discord.app_commands.describe(
+        name="Technique, e.g. two pointers, sliding window, dynamic programming"
+    )
+    async def pattern_cmd(interaction: discord.Interaction, name: str):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        lesson = await asyncio.to_thread(leetcode_ai.explain_pattern, name)
+        if not lesson:
+            await interaction.followup.send(
+                "Couldn't put together that lesson right now. Try again in a bit.",
+                ephemeral=True,
+            )
+            return
+        embed = discord.Embed(
+            title=f"🧩 {lesson.get('name', name.title())}",
+            color=discord.Color.purple(),
+        )
+        embed.set_author(name="Silver Wolf · Pattern School", icon_url=_SW_ICON)
+        if lesson.get("intro"):
+            embed.description = lesson["intro"][:600]
+        if lesson.get("what"):
+            embed.add_field(name="🎯 What it is", value=lesson["what"][:1024], inline=False)
+            _spacer(embed)
+        if lesson.get("when"):
+            embed.add_field(name="🔑 When to reach for it", value=lesson["when"][:1024], inline=False)
+            _spacer(embed)
+        if lesson.get("how"):
+            embed.add_field(name="🪜 How it works", value=lesson["how"][:1024], inline=False)
+        # example problems (slugs → linked). Pull tag matches from the API.
+        tag = name.strip().lower().replace(" ", "-")
+        rows, _ = await asyncio.to_thread(leetcode_api.problems_by_tag, tag, 6)
+        if rows:
+            _spacer(embed)
+            embed.add_field(
+                name="🎮 Practice problems",
+                value=_problem_list_lines(rows, limit=6),
+                inline=False,
+            )
+        if lesson.get("outro"):
+            embed.set_footer(text="🐺 " + lesson["outro"][:200])
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---------------- /leaderboard ----------------
+    _LB_CHOICES = [
+        discord.app_commands.Choice(name="All-time", value="all"),
+        discord.app_commands.Choice(name="This week", value="week"),
+        discord.app_commands.Choice(name="Today", value="day"),
+    ]
+
+    @group.command(
+        name="leaderboard", description="LeetCode solve rankings for the server"
+    )
+    @discord.app_commands.describe(range="Time range")
+    @discord.app_commands.choices(range=_LB_CHOICES)
+    async def leaderboard_cmd(
+        interaction: discord.Interaction,
+        range: discord.app_commands.Choice[str] = None,
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        from datetime import datetime, timezone, timedelta
+
+        rng = range.value if range else "all"
+        since = None
+        label = "All-time"
+        now = datetime.now(timezone.utc)
+        if rng == "week":
+            since = (now - timedelta(days=7)).isoformat()
+            label = "This week"
+        elif rng == "day":
+            since = now.date().isoformat()
+            label = "Today"
+
+        db = get_db()
+        board = await asyncio.to_thread(db.get_leetcode_leaderboard, since, 15)
+        if not board:
+            await interaction.followup.send(
+                f"No solves logged {label.lower()} yet. React ✅ on a problem to "
+                "get on the board.",
+                ephemeral=True,
+            )
+            return
+        # Resolve all names in ONE batched query (not N serial round-trips).
+        names = await asyncio.to_thread(
+            db.get_discord_names_for_users, [r["user_id"] for r in board]
+        )
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, row in enumerate(board):
+            name = names.get(row["user_id"]) or "a grinder"
+            mark = medals[i] if i < 3 else f"`{i + 1}.`"
+            lines.append(f"{mark} **{name}** — {row['solves']} solved")
+        embed = discord.Embed(
+            title=f"🏆 LeetCode Leaderboard · {label}",
+            description="\n".join(lines),
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text="🐺 React ✅ when you clear one to climb the board.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---------------- /hint ----------------
+    @group.command(
+        name="hint",
+        description="Get progressive hints for a problem — no spoilers, no solution",
+    )
+    @discord.app_commands.describe(query="Problem number, slug, or 'daily'")
+    async def hint_cmd(interaction: discord.Interaction, query: str = "daily"):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        q = (query or "daily").strip().lower()
+        if q in ("daily", "today", ""):
+            problem = await asyncio.to_thread(leetcode_api.get_daily)
+        else:
+            key = q if (q.isdigit() or "-" in q) else q.replace(" ", "-")
+            problem = await asyncio.to_thread(leetcode_api.get_problem, key)
+        if not problem:
+            await interaction.followup.send(
+                f"Couldn't find `{query}`. Try a number or slug.", ephemeral=True
+            )
+            return
+        ladder = await asyncio.to_thread(leetcode_ai.hint_ladder, problem)
+        if not ladder or not ladder.get("hints"):
+            await interaction.followup.send(
+                "Couldn't build hints right now. Try again in a bit.", ephemeral=True
+            )
+            return
+        diff = problem.get("difficulty") or ""
+        embed = discord.Embed(
+            title=f"💡 Hints · {problem.get('title')}",
+            url=problem.get("url") or None,
+            color=_DIFF_COLOR.get(diff, discord.Color.blurple()),
+        )
+        embed.set_author(name="Silver Wolf · Hint Ladder", icon_url=_SW_ICON)
+        embed.description = "_Each hint is hidden — reveal them one at a time, only as far as you need._"
+        labels = ["🟢 Nudge", "🟡 The pattern", "🔴 First step"]
+        for i, h in enumerate(ladder["hints"][:3]):
+            embed.add_field(
+                name=labels[i] if i < len(labels) else f"Hint {i + 1}",
+                value=f"||{h[:1000]}||",
+                inline=False,
+            )
+            _spacer(embed)
+        embed.set_footer(text="🐺 Try it before peeking further. That's how the pattern sticks.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---------------- /explaincode ----------------
+    @group.command(
+        name="explaincode",
+        description="Paste YOUR code — Silver Wolf explains why it's slow/buggy + the fix",
+    )
+    @discord.app_commands.describe(
+        code="Your solution code",
+        problem="(Optional) problem number/slug for context",
+    )
+    async def explaincode_cmd(
+        interaction: discord.Interaction, code: str, problem: str = None
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        prob = None
+        if problem:
+            key = problem.strip().lower()
+            key = key if (key.isdigit() or "-" in key) else key.replace(" ", "-")
+            prob = await asyncio.to_thread(leetcode_api.get_problem, key)
+        review = await asyncio.to_thread(leetcode_ai.explain_user_code, code, prob)
+        if not review:
+            await interaction.followup.send(
+                "Couldn't analyze that right now. Try again in a bit.", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title="🔎 Code Review",
+            color=discord.Color.blurple(),
+        )
+        embed.set_author(name="Silver Wolf · Debugger", icon_url=_SW_ICON)
+        if review.get("verdict"):
+            embed.description = f"**{review['verdict'][:500]}**"
+        if review.get("what_it_does"):
+            embed.add_field(name="📖 What your code does", value=review["what_it_does"][:1024], inline=False)
+            _spacer(embed)
+        if review.get("complexity"):
+            embed.add_field(name="⏱️ Complexity", value=review["complexity"][:1024], inline=False)
+        issues = review.get("issues") or []
+        if issues:
+            _spacer(embed)
+            embed.add_field(
+                name="🐛 Issues",
+                value="\n".join(f"• {x}" for x in issues)[:1024],
+                inline=False,
+            )
+        if review.get("fix"):
+            _spacer(embed)
+            embed.add_field(name="🛠️ The fix", value=review["fix"][:1024], inline=False)
+        if review.get("encouragement"):
+            embed.set_footer(text="🐺 " + review["encouragement"][:200])
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---------------- /weakspots ----------------
+    @group.command(
+        name="weakspots",
+        description="See which LeetCode patterns you keep struggling with",
+    )
+    async def weakspots_cmd(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        db = get_db()
+        user = interaction.user
+        uid = await asyncio.to_thread(
+            db.get_or_create_user, user.id, user.name, user.display_name
+        )
+        solves = await asyncio.to_thread(db.get_leetcode_solves, uid) if uid else []
+        # Aggregate struggle/fail counts by topic tag.
+        from collections import Counter
+        struggled_by_topic = Counter()
+        total_by_topic = Counter()
+        for s in solves:
+            topics = (s.get("topics") or "").split(",")
+            for t in topics:
+                t = t.strip()
+                if not t:
+                    continue
+                total_by_topic[t] += 1
+                if s.get("status") in ("struggled", "failed"):
+                    struggled_by_topic[t] += 1
+        if not total_by_topic:
+            await interaction.followup.send(
+                "No attempt history yet. Log some problems (react ✅, or mark ones "
+                "you struggled with) and I'll map your weak spots.",
+                ephemeral=True,
+            )
+            return
+        # Rank by struggle RATE (min 2 attempts to be meaningful).
+        ranked = []
+        for t, tot in total_by_topic.items():
+            if tot < 2:
+                continue
+            rate = struggled_by_topic[t] / tot
+            if rate > 0:
+                ranked.append((t, struggled_by_topic[t], tot, rate))
+        ranked.sort(key=lambda x: -x[3])
+        embed = discord.Embed(
+            title=f"🎯 {user.display_name}'s Weak Spots",
+            color=discord.Color.orange(),
+        )
+        embed.set_author(name="Silver Wolf · Scouting Report", icon_url=_SW_ICON)
+        if not ranked:
+            embed.description = "No clear weak pattern yet — you're clearing what you touch. Go pick a harder fight."
+        else:
+            lines = []
+            for t, bad, tot, rate in ranked[:8]:
+                bar = "🔴" if rate >= 0.6 else "🟠" if rate >= 0.3 else "🟡"
+                lines.append(f"{bar} **{t}** — struggled {bad}/{tot} ({rate * 100:.0f}%)")
+            embed.description = "\n".join(lines)
+            embed.add_field(
+                name="🐺 Silver Wolf says",
+                value=f"Grind `{ranked[0][0]}` next — that's the hole in your build. "
+                "Try `/leetcode pattern " + ranked[0][0].lower() + "`.",
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---------------- /review (spaced repetition) ----------------
+    @group.command(
+        name="review",
+        description="Problems due for a spaced-repetition review — beat forgetting",
+    )
+    async def review_cmd(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        from datetime import datetime, timezone
+
+        db = get_db()
+        user = interaction.user
+        uid = await asyncio.to_thread(
+            db.get_or_create_user, user.id, user.name, user.display_name
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        due = await asyncio.to_thread(db.get_leetcode_due_reviews, uid, now) if uid else []
+        if not due:
+            await interaction.followup.send(
+                "Nothing due for review — your memory's holding. Solve more problems "
+                "(especially ones you struggled with) and I'll resurface them later.",
+                ephemeral=True,
+            )
+            return
+        rows = [
+            {
+                "title": s["problem_slug"].replace("-", " ").title(),
+                "slug": s["problem_slug"],
+                "difficulty": s.get("difficulty"),
+            }
+            for s in due
+        ]
+        embed = discord.Embed(
+            title="🔁 Due for Review",
+            description=_problem_list_lines(rows, limit=15),
+            color=discord.Color.teal(),
+        )
+        embed.set_author(name="Silver Wolf · Spaced Repetition", icon_url=_SW_ICON)
+        embed.set_footer(
+            text="🐺 Re-solve these to lock them in. Forgetting is the real boss."
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---------------- /mock (timed OA simulation) ----------------
+    @group.command(
+        name="mock",
+        description="Timed OA simulation — N problems, a countdown, real pressure",
+    )
+    @discord.app_commands.describe(
+        minutes="Time limit (default 60)",
+        count="How many problems (default 2)",
+        difficulty="Difficulty (default medium)",
+    )
+    @discord.app_commands.choices(difficulty=_DIFF_CHOICES)
+    async def mock_cmd(
+        interaction: discord.Interaction,
+        minutes: int = 60,
+        count: int = 2,
+        difficulty: discord.app_commands.Choice[str] = None,
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        minutes = max(5, min(180, minutes))
+        count = max(1, min(4, count))
+        diff = difficulty.value if difficulty else "medium"
+
+        problems = []
+        seen = set()
+        for _ in range(count * 3):  # oversample; dedupe
+            if len(problems) >= count:
+                break
+            p = await asyncio.to_thread(leetcode_api.random_problem, diff)
+            if p and p["slug"] not in seen:
+                seen.add(p["slug"])
+                problems.append(p)
+        if not problems:
+            await interaction.followup.send(
+                "Couldn't assemble a mock set right now. Try again.", ephemeral=True
+            )
+            return
+
+        from datetime import datetime, timezone, timedelta
+
+        # deadline as a Discord relative timestamp (client renders a live countdown)
+        end = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        end_ts = int(end.timestamp())
+
+        embed = discord.Embed(
+            title=f"⏱️ Mock OA · {len(problems)} problem(s) · {minutes} min",
+            description=(
+                f"**Clock's running.** Ends <t:{end_ts}:R> (at <t:{end_ts}:t>).\n"
+                "No peeking at solutions — treat it like the real assessment."
+            ),
+            color=discord.Color.red(),
+        )
+        embed.set_author(name="Silver Wolf · Timed Run", icon_url=_SW_ICON)
+        for i, p in enumerate(problems, 1):
+            dm = _DIFF_EMOJI.get(p.get("difficulty"), "⚪")
+            embed.add_field(
+                name=f"{dm} Problem {i}",
+                value=f"[{p['title']}]({p['url']})  ·  `{p.get('difficulty','')}`",
+                inline=False,
+            )
+        embed.set_footer(text="🐺 Simulate it for real: no IDE autocomplete, no Google. Go.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---------------- /learn (DS&A pattern lesson + practice) ----------------
+    async def _learn_autocomplete(interaction: discord.Interaction, current: str):
+        cur = (current or "").lower()
+        opts = []
+        for p in leetcode_api.roadmap_patterns():
+            if cur in p["name"].lower() or cur in p["key"]:
+                opts.append(
+                    discord.app_commands.Choice(name=p["name"], value=p["key"])
+                )
+            if len(opts) >= 25:
+                break
+        return opts
+
+    @group.command(
+        name="learn",
+        description="Learn a DS&A pattern with Silver Wolf + practice problems",
+    )
+    @discord.app_commands.describe(
+        topic="Pattern to learn, e.g. two pointers, sliding window, dp, bfs"
+    )
+    @discord.app_commands.autocomplete(topic=_learn_autocomplete)
+    async def learn_cmd(interaction: discord.Interaction, topic: str):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        pat = await asyncio.to_thread(leetcode_api.roadmap_pattern, topic)
+        # Fall back to a freeform pattern lesson if it's not a roadmap key.
+        pat_name = pat["name"] if pat else topic
+        # Anchor the lesson to the student's own study-note facts when we have them.
+        knowledge = leetcode_api.pattern_knowledge(pat["key"]) if pat else None
+        lesson = await asyncio.to_thread(
+            leetcode_ai.explain_pattern, pat_name, knowledge
+        )
+        if not lesson:
+            await interaction.followup.send(
+                "Couldn't build that lesson right now. Try again in a bit.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"📚 Learn · {lesson.get('name', pat_name)}",
+            color=discord.Color.purple(),
+        )
+        embed.set_author(name="Silver Wolf · DS&A School", icon_url=_SW_ICON)
+        if lesson.get("intro"):
+            embed.description = lesson["intro"][:600]
+        # Shape-first order: recognition (when) leads — it's the real skill — then
+        # what/how, then the named parts (state, complexity), self-check questions,
+        # the reusable template, and the classic misconception.
+        if lesson.get("when"):
+            embed.add_field(name="🔍 Spot it (the signal)", value=lesson["when"][:1024], inline=False)
+            _spacer(embed)
+        if lesson.get("what"):
+            embed.add_field(name="🎯 What it is", value=lesson["what"][:1024], inline=False)
+        if lesson.get("how"):
+            embed.add_field(name="🪜 How it works", value=lesson["how"][:1024], inline=False)
+        _spacer(embed)
+        if lesson.get("state"):
+            embed.add_field(name="📦 State to track", value=lesson["state"][:1024], inline=False)
+        if lesson.get("complexity"):
+            embed.add_field(name="⏱️ Complexity", value=lesson["complexity"][:1024], inline=False)
+        qs = lesson.get("questions") or []
+        if qs:
+            _spacer(embed)
+            embed.add_field(
+                name="❓ Ask yourself",
+                value="\n".join(f"• {q}" for q in qs[:4])[:1024],
+                inline=False,
+            )
+        if lesson.get("template"):
+            tmpl = lesson["template"][:1000]
+            embed.add_field(
+                name="🧩 The template",
+                value=f"```\n{tmpl}\n```"[:1024],
+                inline=False,
+            )
+        if lesson.get("misconception"):
+            embed.add_field(
+                name="⚠️ Common trap",
+                value=lesson["misconception"][:1024],
+                inline=False,
+            )
+
+        # Practice problems: prefer the roadmap's curated examples, top up from the
+        # LeetCode tag if the pattern has one.
+        practice_rows = []
+        if pat:
+            for slug in pat.get("examples", [])[:6]:
+                practice_rows.append({"title": slug.replace("-", " ").title(), "slug": slug})
+        tag = (pat or {}).get("tag") or pat_name.strip().lower().replace(" ", "-")
+        if len(practice_rows) < 6:
+            more, _ = await asyncio.to_thread(leetcode_api.problems_by_tag, tag, 6)
+            seen = {r["slug"] for r in practice_rows}
+            for r in more:
+                if r["slug"] not in seen:
+                    practice_rows.append(r)
+                if len(practice_rows) >= 8:
+                    break
+        if practice_rows:
+            _spacer(embed)
+            embed.add_field(
+                name="🎮 Practice these",
+                value=_problem_list_lines(practice_rows, limit=8),
+                inline=False,
+            )
+        if lesson.get("outro"):
+            embed.set_footer(text="🐺 " + lesson["outro"][:200])
+
+        view = None
+        if pat:  # only roadmap patterns are trackable
+            view = _LearnView(pat["key"], pat["name"], get_db)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ---------------- /roadmap (curriculum + progress) ----------------
+    @group.command(
+        name="roadmap",
+        description="Your DS&A learning roadmap — what to study and what's next",
+    )
+    async def roadmap_cmd(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        db = get_db()
+        user = interaction.user
+        uid = await asyncio.to_thread(
+            db.get_or_create_user, user.id, user.name, user.display_name
+        )
+        learned = set(await asyncio.to_thread(db.get_learned_patterns, uid) if uid else [])
+        patterns = leetcode_api.roadmap_patterns()
+        cats = {c["key"]: c for c in leetcode_api.roadmap_categories()}
+
+        embed = discord.Embed(
+            title="🗺️ DS&A Roadmap",
+            description=(
+                f"**{len(learned)}/{len(patterns)}** patterns learned. "
+                "✅ = done, ⬜ = to go. Use `/leetcode learn <pattern>` to study one."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_author(name="Silver Wolf · Skill Tree", icon_url=_SW_ICON)
+
+        # Group by category, in category declared order.
+        by_cat = {}
+        for p in patterns:
+            by_cat.setdefault(p["category"], []).append(p)
+        for ckey, c in cats.items():
+            group = by_cat.get(ckey)
+            if not group:
+                continue
+            lines = []
+            for p in group:
+                mark = "✅" if p["key"] in learned else "⬜"
+                lines.append(f"{mark} {p['name']}")
+            embed.add_field(
+                name=f"{c.get('emoji','')} {c['name']}",
+                value="\n".join(lines)[:1024],
+                inline=True,
+            )
+
+        nxt = leetcode_api.roadmap_next(learned)
+        if nxt:
+            embed.add_field(
+                name="🐺 Study next",
+                value=f"**{nxt['name']}** — `/leetcode learn {nxt['key'].replace('_',' ')}`",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="🐺 100% cleared",
+                value="You've learned every pattern on the roadmap. 我独自满级. Now go grind them.",
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    bot.tree.add_command(group)
+    log.info(
+        "Registered /leetcode group (problem, random, company, pattern, learn, "
+        "roadmap, hint, mock, explaincode, streak, leaderboard, weakspots, review, preview)"
+    )
 
 
 def _consecutive_day_streak(solves):

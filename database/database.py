@@ -6,6 +6,78 @@ from dotenv import load_dotenv
 from supabase import create_client
 
 
+# --- US-location classifier ---------------------------------------------------
+# Two-letter USPS state/territory codes.
+_US_STATE_ABBR = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL",
+    "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT",
+    "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
+    "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC", "PR",
+}
+_US_STATE_NAMES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho", "illinois",
+    "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
+    "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana",
+    "nebraska", "nevada", "new hampshire", "new jersey", "new mexico", "new york",
+    "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
+    "rhode island", "south carolina", "south dakota", "tennessee", "texas", "utah",
+    "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming",
+    "district of columbia", "puerto rico",
+}
+_US_MARKERS = ("united states", "u.s.", "u.s.a", "usa", "us-", "-us", "(us)", "us,")
+# Canadian province codes — the main abbreviation collision (e.g. "Toronto, ON"
+# has no country word but ON = Ontario, not a US state). Reject when one appears.
+_CA_PROVINCES = {"ON", "QC", "BC", "AB", "MB", "SK", "NS", "NB", "NL", "PE", "YT", "NT", "NU"}
+# Non-US country names that appear in this feed's locations — an explicit reject.
+_NON_US_COUNTRIES = {
+    "canada", "united kingdom", "uk", "england", "scotland", "ireland", "india",
+    "germany", "france", "spain", "italy", "netherlands", "poland", "romania",
+    "mexico", "brazil", "argentina", "china", "japan", "singapore", "australia",
+    "new zealand", "israel", "switzerland", "sweden", "norway", "denmark",
+    "portugal", "belgium", "austria", "czech", "hungary", "ukraine", "turkey",
+    "egypt", "nigeria", "kenya", "south africa", "uae", "dubai", "qatar",
+    "philippines", "vietnam", "thailand", "malaysia", "indonesia", "taiwan",
+    "hong kong", "korea", "colombia", "chile", "peru", "costa rica",
+}
+
+
+def is_us_location(location):
+    """Best-effort: is this job location in the US? Handles 'United States',
+    'City, ST, United States', a bare state name/abbr, and 'Remote (US)'. Rejects
+    known foreign countries. A blank or bare 'Remote' location is treated as US
+    (ambiguous — keep it rather than silently drop a possibly-US remote role)."""
+    if not location:
+        return True  # unknown → don't drop
+    low = location.lower().strip()
+
+    # 1) explicit non-US country anywhere → reject (unless it also names the US).
+    has_us_marker = any(m in low for m in _US_MARKERS)
+    for c in _NON_US_COUNTRIES:
+        if re.search(r"(?<![a-z])" + re.escape(c) + r"(?![a-z])", low):
+            if not has_us_marker:
+                return False
+    # 2) explicit US marker → accept.
+    if has_us_marker:
+        return True
+    # 3) a US state name present → accept.
+    for s in _US_STATE_NAMES:
+        if re.search(r"(?<![a-z])" + re.escape(s) + r"(?![a-z])", low):
+            return True
+    # 4) a two-letter code as its own token: US state → accept; Canadian province
+    #    (no US marker) → reject (e.g. "Toronto, ON").
+    tokens = {t.upper() for t in re.split(r"[,\s/|]+", location.strip())}
+    if tokens & _US_STATE_ABBR:
+        return True
+    if tokens & _CA_PROVINCES:
+        return False
+    # 5) bare 'Remote' / 'Hybrid' with no country → ambiguous, keep it.
+    if low in ("remote", "hybrid", "on-site", "onsite") or "remote" in low:
+        return True
+    # 6) nothing identifiable → keep (don't drop on uncertainty).
+    return True
+
+
 class SupabaseDatabase:
     def __init__(self):
 
@@ -39,7 +111,7 @@ class SupabaseDatabase:
 
     # Bump whenever the Score prompt / output schema changes so stale rows
     # (old voice, missing bilingual fields) are ignored and regenerated.
-    SCORE_CACHE_VERSION = 51
+    SCORE_CACHE_VERSION = 52
 
     # --- Score cache ---------------------------------------------------
     def get_cached_score(self, user_uuid, job_table, job_id):
@@ -169,6 +241,48 @@ class SupabaseDatabase:
             self.logger.exception("Failed get_or_create_user for %s", discord_id)
             return None
 
+    def get_discord_name_for_user(self, user_uuid):
+        """display_name (or username) for a users.id UUID — used to label the
+        leaderboard. Returns None if unknown."""
+        try:
+            data = (
+                self.supabase.table(self.users_table)
+                .select("display_name,username")
+                .eq("id", user_uuid)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if not data:
+                return None
+            return data[0].get("display_name") or data[0].get("username")
+        except Exception:
+            self.logger.exception("Failed resolving name for user %s", user_uuid)
+            return None
+
+    def get_discord_names_for_users(self, user_uuids):
+        """Batch name resolver: {users.id -> display_name/username} in ONE query.
+        Used by the leaderboard so it doesn't fire N serial round-trips."""
+        ids = [u for u in (user_uuids or []) if u]
+        if not ids:
+            return {}
+        try:
+            rows = (
+                self.supabase.table(self.users_table)
+                .select("id,display_name,username")
+                .in_("id", ids)
+                .execute()
+                .data
+                or []
+            )
+            return {
+                r["id"]: (r.get("display_name") or r.get("username"))
+                for r in rows
+            }
+        except Exception:
+            self.logger.exception("Failed batch-resolving user names")
+            return {}
+
     def add_subscription(self, user_uuid, discord_id, category=None, keyword=None,
                          smart=False):
         """Create an alert subscription. Returns the row, or None on error.
@@ -243,17 +357,53 @@ class SupabaseDatabase:
             self.logger.exception("Failed recording smart-alert send")
 
     # --- LeetCode solve tracking (grind channel streaks) ------------------
-    def mark_leetcode_solved(self, user_uuid, problem_slug, difficulty=None):
-        """Record that a user solved a problem. Idempotent on (user, slug) so
-        toggling the ✅ react twice doesn't double-count. Returns True on success."""
+    def mark_leetcode_solved(
+        self, user_uuid, problem_slug, difficulty=None,
+        status="solved", topics=None, review_at=None,
+    ):
+        """Record an attempt. Idempotent on (user, slug). To preserve history on a
+        re-react, an EXISTING row is not blindly overwritten:
+          - review_at is set only on FIRST insert — a re-react won't reset the
+            spaced-repetition clock (which would defeat /review), unless the caller
+            passes a review_at AND the row has none.
+          - a 'struggled'/'failed' status is NOT downgraded to 'solved' by a plain
+            re-react — the weak-spot signal survives. An explicit non-solved status
+            always writes through.
+        `status` is solved/struggled/failed; `topics` is a comma-joined tag list."""
         try:
+            existing = (
+                self.supabase.table("leetcode_solves")
+                .select("status,review_at")
+                .eq("user_id", user_uuid)
+                .eq("problem_slug", problem_slug)
+                .limit(1)
+                .execute()
+                .data
+            )
+            prior = existing[0] if existing else None
+
+            row = {
+                "user_id": user_uuid,
+                "problem_slug": problem_slug,
+                "difficulty": difficulty,
+                "status": status,
+            }
+            if prior:
+                # Don't downgrade a recorded struggle to 'solved' on a re-react.
+                if status == "solved" and prior.get("status") in ("struggled", "failed"):
+                    row["status"] = prior["status"]
+                # Preserve an already-scheduled review; only fill if none exists.
+                if prior.get("review_at"):
+                    row["review_at"] = prior["review_at"]
+                elif review_at is not None:
+                    row["review_at"] = review_at
+            elif review_at is not None:
+                row["review_at"] = review_at
+            if topics is not None:
+                row["topics"] = topics
+
             self.supabase.table("leetcode_solves").upsert(
-                {
-                    "user_id": user_uuid,
-                    "problem_slug": problem_slug,
-                    "difficulty": difficulty,
-                },
-                on_conflict="user_id,problem_slug",
+                row, on_conflict="user_id,problem_slug"
             ).execute()
             return True
         except Exception:
@@ -272,12 +422,12 @@ class SupabaseDatabase:
             return False
 
     def get_leetcode_solves(self, user_uuid):
-        """All of a user's solve rows (solved_at, difficulty), newest first.
-        The streak/count is derived from these by the command layer."""
+        """All of a user's attempt rows, newest first. Streak/count/weakspots are
+        derived from these by the command layer."""
         try:
             return (
                 self.supabase.table("leetcode_solves")
-                .select("problem_slug,difficulty,solved_at")
+                .select("problem_slug,difficulty,status,topics,solved_at,review_at")
                 .eq("user_id", user_uuid)
                 .order("solved_at", desc=True)
                 .execute()
@@ -286,6 +436,79 @@ class SupabaseDatabase:
             )
         except Exception:
             self.logger.exception("Failed fetching leetcode solves for %s", user_uuid)
+            return []
+
+    def get_leetcode_due_reviews(self, user_uuid, now_iso):
+        """Attempts whose spaced-repetition review_at is due (<= now). Oldest-due
+        first. Powers /review."""
+        try:
+            return (
+                self.supabase.table("leetcode_solves")
+                .select("problem_slug,difficulty,status,topics,review_at")
+                .eq("user_id", user_uuid)
+                .not_.is_("review_at", "null")
+                .lte("review_at", now_iso)
+                .order("review_at", desc=False)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            self.logger.exception("Failed fetching due reviews for %s", user_uuid)
+            return []
+
+    def get_leetcode_leaderboard(self, since_iso=None, limit=15):
+        """Top solvers by solved count. `since_iso` restricts to recent attempts
+        (weekly/daily boards); None = all-time. Returns [{user_id, solves}]. The
+        command layer resolves user_id → display name. Counts only status='solved'.
+        Aggregation is done client-side (small table; PostgREST lacks GROUP BY)."""
+        try:
+            q = (
+                self.supabase.table("leetcode_solves")
+                .select("user_id,solved_at,status")
+                .eq("status", "solved")
+            )
+            if since_iso:
+                q = q.gte("solved_at", since_iso)
+            rows = q.execute().data or []
+            counts = {}
+            for r in rows:
+                counts[r["user_id"]] = counts.get(r["user_id"], 0) + 1
+            ranked = sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
+            return [{"user_id": u, "solves": n} for u, n in ranked]
+        except Exception:
+            self.logger.exception("Failed building leetcode leaderboard")
+            return []
+
+    # --- DS&A learning progress (roadmap) ---------------------------------
+    def mark_pattern_learned(self, user_uuid, pattern_key):
+        """Record that a user learned a roadmap pattern. Idempotent on
+        (user, pattern). Returns True on success."""
+        try:
+            self.supabase.table("leetcode_learned").upsert(
+                {"user_id": user_uuid, "pattern_key": pattern_key},
+                on_conflict="user_id,pattern_key",
+            ).execute()
+            return True
+        except Exception:
+            self.logger.exception("Failed recording learned pattern")
+            return False
+
+    def get_learned_patterns(self, user_uuid):
+        """List of pattern_keys the user has learned (for /roadmap progress and the
+        'learn next' suggestion)."""
+        try:
+            rows = (
+                self.supabase.table("leetcode_learned")
+                .select("pattern_key")
+                .eq("user_id", user_uuid)
+                .execute()
+                .data
+                or []
+            )
+            return [r["pattern_key"] for r in rows]
+        except Exception:
+            self.logger.exception("Failed fetching learned patterns for %s", user_uuid)
             return []
 
     def was_daily_posted(self, problem_date):
@@ -526,6 +749,17 @@ class SupabaseDatabase:
                 {k: v for k, v in row.items() if not k.startswith("_")}
                 for row in internships
             ]
+
+            # US-only filter: drop roles clearly located outside the US before
+            # they're ever inserted (this is a US-focused bot). Ambiguous/blank
+            # locations are KEPT (is_us_location errs toward keeping).
+            before_us = len(internships)
+            internships = [r for r in internships if is_us_location(r.get("job_location"))]
+            dropped = before_us - len(internships)
+            if dropped:
+                self.logger.info(
+                    "US filter: dropped %d non-US role(s) for %s", dropped, table
+                )
 
             existing = self.get_existing_internships(table)
             existing_keys = {self._dedup_key(item) for item in existing}

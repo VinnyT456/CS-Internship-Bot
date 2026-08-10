@@ -196,6 +196,16 @@ CREATE TABLE IF NOT EXISTS public.leetcode_solves (
 
 ALTER TABLE IF EXISTS public.leetcode_solves DISABLE ROW LEVEL SECURITY;
 
+-- Struggle log: how the attempt went, so /weakspots can find the patterns a user
+-- keeps missing and spaced-repetition can resurface them. 'solved' = clean clear,
+-- 'struggled' = got it but needed the solution/hints, 'failed' = couldn't. Topic
+-- tags (comma-joined) let /weakspots aggregate by pattern. review_at drives the
+-- spaced-repetition due list.
+ALTER TABLE IF EXISTS public.leetcode_solves
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'solved',
+    ADD COLUMN IF NOT EXISTS topics TEXT,
+    ADD COLUMN IF NOT EXISTS review_at TIMESTAMPTZ;
+
 -- Sent-log for the daily LeetCode post: one row per problem_date once the daily
 -- embed is posted, so the scheduled loop + startup catch-up never double-post and
 -- a day is never skipped (same idea as the internship scrape gate). UNIQUE on
@@ -225,3 +235,17 @@ CREATE TABLE IF NOT EXISTS public.sent_announcements (
 );
 
 ALTER TABLE IF EXISTS public.sent_announcements DISABLE ROW LEVEL SECURITY;
+
+-- DS&A learning progress: one row per (user, pattern) when a user learns a
+-- roadmap pattern via /learn. Powers /roadmap completion and the "learn next"
+-- suggestion. pattern_key matches the keys in leetcode/dsa_roadmap.json.
+CREATE TABLE IF NOT EXISTS public.leetcode_learned (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id),
+    pattern_key TEXT NOT NULL,
+    learned_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (user_id, pattern_key)
+);
+
+ALTER TABLE IF EXISTS public.leetcode_learned DISABLE ROW LEVEL SECURITY;

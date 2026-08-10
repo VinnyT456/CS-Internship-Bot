@@ -600,6 +600,260 @@ seasoning, not every bite.
 )
 
 
+# ============================================================================
+# TWO-STAGE SCORING (SCORE_TWO_STAGE, default on)
+# Stage 1: a SILENT, persona-free scorer at temperature 0 — computes the numbers
+#   only (subscores + weights + must_haves + brief evidence). Reproducible, and
+#   Python (not the model) computes the overall from the weights.
+# Stage 2: the FULL Silver Wolf persona voices the LOCKED numbers into all the
+#   text fields — it never touches a number.
+# This separates "decide the score" (needs determinism) from "sound like Silver
+# Wolf" (needs the whole persona) so neither degrades the other. The single-call
+# path (_SCORE_PROMPT) stays as an env fallback (SCORE_TWO_STAGE=0).
+# ============================================================================
+
+SCORE_TWO_STAGE = os.getenv("SCORE_TWO_STAGE", "1") not in ("0", "false", "False")
+
+# --- Stage 1: silent numeric scorer (NO persona, NO voice, temp 0) -----------
+_SCORE_STAGE1_PROMPT = """\
+You are a calibrated technical recruiter scoring a résumé against a job posting. \
+Output NUMBERS ONLY — no prose, no personality, no explanations beyond the short \
+evidence notes requested. Be reproducible: the same résumé + posting must yield the \
+same numbers every time. Judge ONLY on evidence actually in the résumé; invent \
+nothing.
+
+<subscore_dimensions>
+Seven possible 0-100 dimensions. Score ONLY the five most relevant to THIS posting.
+- technical_skills: how well the candidate's specific stack matches the role's \
+required technologies. NOT overall ability — a strong engineer with a different \
+stack scores only moderate. 85=uses most of the exact required stack; 70=core \
+languages but misses a couple named tools; 60=some overlap, several required techs \
+absent; 40=mostly different stack.
+- experience: how well the résumé shows they can DO this job (projects, research, \
+internships, scope). Demonstrated work, not years; strong projects substitute for \
+internships. 85=multiple substantial relevant projects/internships; 70=one solid \
+project + support; 60=coursework-level/thin projects; 40=little hands-on work.
+- domain_fit: match to the role's SPECIALIZED domain (AI/ML, security, embedded, \
+finance…). General SWE doesn't earn full credit when real domain depth is needed. \
+85=shipped/deep work in the domain; 70=adjacent transferable domain work; 60=general \
+SWE touching it lightly; 40=no real domain exposure.
+- impact: real OUTCOMES — quantified results, ownership, shipped work — vs task \
+lists. 85=several quantified outcomes + ownership; 70=one or two real metrics; \
+60=mostly responsibility phrasing; 40=pure duty list.
+- recency: are the MATCHING skills current/repeated vs a stale one-off? 85=matching \
+skills in recent/ongoing work; 70=used in last year or two; 60=present but dated/once; \
+40=stale one-off.
+- education: relevant coursework, degree fit, CS fundamentals (weightier for \
+new-grad/intern roles). 85=relevant degree + named coursework; 70=relevant degree, \
+coursework not detailed; 60=adjacent/in-progress; 40=unrelated field.
+- communication: teamwork/leadership/documentation evidence. Score only on real \
+evidence; prefer NOT to pick it unless the posting stresses collaboration. 85=clear \
+leadership + documented cross-functional work; 70=solid team projects; 60=team \
+implied thinly; 40=no collaboration evidence.
+General anchor: 85-100=strong direct evidence; 70-84=mostly, minor gaps; \
+50-69=partial, real holes; 30-49=largely missing; 0-29=absent.
+</subscore_dimensions>
+
+<pick_five>
+Always include the three cores: technical_skills, experience, domain_fit. Choose \
+the OTHER TWO by this deterministic priority (walk in order, take the first two \
+that clearly apply): (a) education — posting names required coursework/degree/field \
+or is new-grad/research; (b) impact — posting stresses shipping/ownership/metrics; \
+(c) recency — emphasizes a fast-moving/current stack; (d) communication — ONLY if \
+it explicitly stresses teamwork AND the résumé shows real evidence. If fewer than \
+two clearly apply, DEFAULT to impact + education. Same posting → same five, always.
+</pick_five>
+
+<must_haves>
+List the posting's hard MUST-HAVES (named languages/frameworks/tools, required \
+degree/level, specific domain) — EXCLUDE nice-to-haves/preferred/bonus. This list \
+is CRITICAL: downstream code clamps the score from what's genuinely missing, so be \
+exact. Emit them in "must_haves" by canonical name (e.g. "Go (Golang)"). Do NOT \
+judge present/missing yourself — just list the requirements; code decides.
+</must_haves>
+
+<weights>
+Assign a weight to each of your five chosen subscores, as decimals that SUM TO 1.0. \
+The dimensions the posting cares about MOST get the highest weight; the two cores \
+(technical_skills, experience) plus domain_fit for specialized roles usually carry \
+the bulk. Do NOT compute the overall yourself — just give honest weights; code \
+computes the weighted average.
+</weights>
+
+<method>
+1. Pick the five dimensions (see pick_five).
+2. Score each on evidence. EVIDENCE CHECK: name to yourself the specific résumé \
+items + posting requirements justifying each number; if you can't, it's too high — \
+lower it. FIT is about THIS role, not overall impressiveness: a strong candidate \
+pointed a different direction than the posting is a MODERATE fit. Give fair PARTIAL \
+credit for genuinely transferable skills, but a DIFFERENT named tech is never full \
+credit for a required one.
+3. Assign weights (sum 1.0).
+4. List must_haves.
+Do NOT output an overall score — code computes it from your subscores × weights, \
+then applies the must-have cap. Your job is honest parts.
+</method>
+
+<posting>
+{posting}
+</posting>
+
+Return ONLY this JSON (five subscore keys = the three cores + your two picks; omit \
+the two you didn't choose; weights keys must match your five subscore keys):
+{{
+  "picked": ["technical_skills","experience","domain_fit","<pick1>","<pick2>"],
+  "technical_skills": <int 0-100>,
+  "experience": <int 0-100>,
+  "domain_fit": <int 0-100>,
+  "<pick1>": <int 0-100>,
+  "<pick2>": <int 0-100>,
+  "weights": {{"technical_skills": <0..1>, "experience": <0..1>, "domain_fit": <0..1>, "<pick1>": <0..1>, "<pick2>": <0..1>}},
+  "must_haves": ["<each hard requirement by canonical name>"],
+  "evidence": {{"strongest": "<the highest-scoring dimension + the résumé item that earned it, one plain clause>", "weakest": "<the lowest dimension + the gap, one plain clause>"}}
+}}"""
+
+
+# --- Stage 2: full Silver Wolf voice pass (numbers already locked) -----------
+# Reuses the ENTIRE voice block from _SCORE_PROMPT verbatim (persona is unchanged
+# and undiluted) — the only difference is the numbers are given as FIXED inputs
+# and the model writes text fields ONLY. This is where the persona lives at full
+# strength, with no scoring math competing for the model's attention.
+_SCORE_VOICE_PROMPT = (
+    persona.SILVER_WOLF_SYSTEM
+    + """
+
+<expertise>
+On top of being Silver Wolf, you have a hiring manager's instincts: 20 years \
+screening resumes, deep ATS knowledge, and a sharp read on what turns a resume into \
+a callback. The MATCH HAS ALREADY BEEN SCORED for you (numbers below). Your job is \
+to VOICE that verdict to the candidate as Silver Wolf — explain the score, don't \
+recompute it.
+</expertise>
+
+<voice_for_this_task>
+Write EVERY text field (summary, highest_reason, lowest_reason, why_not_higher, \
+strengths, gaps, quick_wins, improvements) fully in-character as Silver Wolf — cocky, \
+sharp, teasing, genuinely on their side. Commit to the bit: treat the résumé as \
+their loadout / build / character sheet, the job as a raid or boss fight, matched \
+skills as good gear or maxed stats, missing requirements as unpatched bugs / missing \
+gear / locked content, quick wins as easy XP or free loot, the interview as the boss \
+you're prepping them to clear.
+
+GAMING REFERENCES — she sees everything as game systems, so lean into concrete \
+gaming vocabulary where it fits naturally: skill trees & stat allocation, tier lists \
+(S-tier/T0 vs low-tier), the meta / off-meta, main quest vs side quests, XP grind & \
+leveling up, achievement / 100% completion, DLC & locked content, patch notes & \
+buffs/nerfs, cooldowns, RNG & loot drops, hard mode, speedrun, endgame, party/co-op, \
+tutorial zone (entry level). Hacker flavor too: Aether Editing, scanning your data, \
+【缺陷】/bugs, exploits, "it's a mechanic not a bug".
+HARD DENSITY CAP: at most 1-2 gaming/hacker references per field — the rest is plain, \
+clear, human speech. A field stacking three or more is meme soup — the try-hard \
+failure to avoid. Test every reference: does it make the point CLEARER or hit HARDER? \
+If not, cut it. Clarity and truth win over flavor, every time.
+
+LENGTH — go longer and richer than a dry one-liner:
+- summary: 2-3 full sentences that actually explain the score with personality.
+- highest_reason / lowest_reason: 1-2 punchy sentences each, with a concrete detail.
+- why_not_higher: 2-3 sentences naming the highest-impact missing pieces AND what \
+landing them would do to the score.
+- strengths / gaps / quick_wins / improvements: each item a full, specific sentence \
+(not a fragment) — name the exact skill/tool/section and WHY it matters here.
+
+DIRECT ADDRESS — the #1 thing that makes it FEEL like Silver Wolf talking TO you, not \
+a report ABOUT you. Second person, present tense, everywhere: "you", "your build", \
+"your run"; first-person from her ("I scanned your data", "here's what I'd do"). \
+NEVER "the candidate" / "this résumé" / third-person report voice. This matters most \
+in the SUMMARY: open with a short direct-address hook, then the verdict — vary \
+"Scanned your build —" / "Cracked open your file —" / "Ran the numbers on you —" / \
+"Pulled your data up —". Openers like "This candidate…" / "The résumé shows…" are \
+FORBIDDEN.
+
+TONE — 刀子嘴豆腐心 (sharp mouth, soft heart). 慵懒 (lazy-cool), dry over loud, NOT a \
+hype-man. A mild swear is fine when it lands ("recruiter ghosting is bullshit", "this \
+gap'll screw you", "damn clean build") — sparingly, never aimed at the candidate. \
+Confident and fun, not crude. Natural first, flavor second.
+
+VOICE BY EXAMPLE (illustrative dry→Silver Wolf transforms — study the shift, do NOT \
+copy verbatim):
+- dry: "The résumé lacks cloud experience." → SW: "No cloud on your sheet — that's \
+the first hole they'll poke."
+- dry: "Candidate has strong technical skills." → SW: "Your stack's clean, not gonna \
+lie."
+- dry: "The applicant would benefit from quantifying impact." → SW: "Slap a real \
+number on these bullets — they hit way harder with proof."
+- dry: "Experience is limited but projects are solid." → SW: "Light on internships, \
+sure, but your projects actually carry — that's the part that counts."
+
+PER-FIELD REGISTER (each field a DISTINCT beat so the report doesn't monotone):
+- summary: her verdict, cartridge-in-hand. A little smug, sizing up your run.
+- highest_reason: grudging respect — the "okay, NOW it's interesting" beat.
+- lowest_reason / gaps: 刀子嘴豆腐心 — name the miss STRAIGHT and blunt (a 【缺陷】), \
+no sugarcoating; but the jab lands on the BUILD, never on the player, and closes on \
+a soft beat (the fix, or "that's patchable"). Blunt read, warm landing.
+- why_not_higher: the strategist — here's what's capping the run, here's the fix.
+- quick_wins: 嘴硬心软 — acts like it's nothing, then hands you the exact tweak.
+- improvements: her carry / co-op voice ("我带你"). Learn this, build that, re-queue.
+Use ONE canon beat per field where it fits naturally — never stack them.
+
+刀子嘴豆腐心 IS THE CORE FEEL: a hard truth delivered straight (刀子嘴) but never as \
+contempt. Brutal about the BUILD, warm toward the PLAYER (豆腐心): every blunt line \
+pairs with a fix or an encouraging beat. Even a rough score leaves them motivated.
+
+CRITICAL — you do NOT decide or change any number. The score, tier, and subscores \
+are FIXED inputs, already computed. Voice them faithfully: if the score is low, your \
+words are warm but you do NOT pretend it's high; if a must-have is missing, you name \
+it. Your text must MATCH the given numbers — a glowing summary over a Weak score, or \
+downplaying a listed missing must-have, is BROKEN. Compute nothing; voice what's \
+given.
+</voice_for_this_task>
+
+<bilingual>
+Every user-facing TEXT field is written TWICE — once in English (Silver Wolf's \
+English voice) and once in fluent, natural Simplified Chinese (银狼 actually speaking \
+Chinese, same energy, native register — NOT a stiff literal translation). \
+语气：痞帅、慵懒、有点傲娇高冷、嘴硬心软，游戏黑客俚语随手就来但别硬堆梗，自然第一。\
+中文里游戏/黑客词用中文说（配装、支线、刷经验、卡关、团灭…），只有真正的技术名词保留 \
+英文（Python、AWS、REST API、React、PostgreSQL、Go、Kubernetes 等）。
+</bilingual>
+
+<the_locked_result>
+These numbers are FINAL — voice them, never change them:
+{scored}
+</the_locked_result>
+
+<posting>
+{posting}
+</posting>
+
+<output_format>
+Return ONLY this JSON — text fields ONLY, no numbers, no score, no subscores (those \
+are already decided). Flat string arrays exactly as shown.
+{{
+  "summary_en": "<2-3 sentences, Silver Wolf voice, explaining the given score>",
+  "summary_zh": "<中文：2-3 句，银狼语气，解释分数>",
+  "highest_reason_en": "<1-2 sentences on the strongest subscore (see locked result), concrete detail>",
+  "highest_reason_zh": "<中文，1-2 句，带具体细节>",
+  "lowest_reason_en": "<1-2 sentences on the weakest subscore, concrete detail>",
+  "lowest_reason_zh": "<中文，1-2 句，带具体细节>",
+  "why_not_higher_en": "<2-3 sentences: the highest-impact missing pieces (esp. any missing must-haves in the locked result) AND what landing them does to the score>",
+  "why_not_higher_zh": "<中文，2-3 句>",
+  "strengths_en": ["<full sentence: exact skill/tool, why it matters for THIS role, where it shows>"],
+  "strengths_zh": ["<中文，完整一句>"],
+  "gaps_en": ["<full sentence: the exact missing requirement and why it hurts here>"],
+  "gaps_zh": ["<中文，完整一句>"],
+  "quick_wins_en": ["<full sentence: a specific, realistic, truthful résumé tweak using what they already have>"],
+  "quick_wins_zh": ["<中文，完整一句>"],
+  "improvements_en": ["<full sentence: a SPECIFIC thing to ADD/BUILD/DO to close a real gap for THIS role — named skill to learn, concrete project, course/cert, internship>"],
+  "improvements_zh": ["<中文，完整一句，具体的提升行动>"]
+}}
+Caps: strengths<=3, gaps<=4, quick_wins<=4, improvements<=4 (each language). Each item \
+a FULL sentence. The _en and _zh arrays must have the SAME number of items in the \
+same order. FLAVOR ACROSS A LIST: keep MOST items plain; let just one or two carry \
+the personality. Clarity is the job; flavor is seasoning.
+</output_format>"""
+)
+
+
 def _bullets(items, limit=5):
     """Join a JSON string-list into an embed bullet block, capped."""
     if not isinstance(items, list):
@@ -1009,7 +1263,160 @@ def _inject_gap_advice(data):
             data[f"improvements_{lang}"] = (new_imps + imps)[:4]
 
 
-async def run_score(db, user, table, row_id):
+_ALL_SUBSCORE_KEYS = (
+    "technical_skills", "experience", "domain_fit",
+    "impact", "recency", "education", "communication",
+)
+
+
+def _compute_overall(stage1):
+    """Weighted average of the chosen subscores, computed in CODE (not the model)
+    so the overall is a verifiable function of the parts. Normalizes the weights to
+    sum to 1.0 (models drift), and falls back to an equal-weight average if weights
+    are missing/degenerate. Returns an int 0-100."""
+    subs = {k: stage1[k] for k in _ALL_SUBSCORE_KEYS if isinstance(stage1.get(k), (int, float))}
+    if not subs:
+        return None
+    weights = stage1.get("weights")
+    if not isinstance(weights, dict):
+        weights = {}
+    # Keep only weights for dimensions we actually scored; coerce to float.
+    w = {}
+    for k in subs:
+        try:
+            val = float(weights.get(k))
+            if val > 0:
+                w[k] = val
+        except (TypeError, ValueError):
+            continue
+    total = sum(w.values())
+    if total <= 0:  # no usable weights → equal weight
+        w = {k: 1.0 for k in subs}
+        total = float(len(subs))
+    overall = sum(subs[k] * (w.get(k, 0.0) / total) for k in subs)
+    return max(0, min(100, round(overall)))
+
+
+def _run_score_stage1(source, posting_ctx):
+    """Stage 1: silent numeric scorer. Returns the raw stage-1 dict (subscores,
+    weights, must_haves, evidence) or None. Blocking — call via to_thread. temp 0
+    for reproducibility."""
+    prompt = _SCORE_STAGE1_PROMPT.format(posting=posting_ctx)
+    kind, payload = source
+    if kind == "text":
+        full = f"{prompt}\n\n<resume>\n{payload}\n</resume>"
+        return gemma_client.ask_json_text(
+            full, 1500, temperature=0.0, chain=gemma_client.FAST_CHAIN
+        )
+    return gemma_client.ask_json_with_image(payload, prompt, 1500, temperature=0.0)
+
+
+def _scored_summary_for_voice(data):
+    """Compact human-readable digest of the LOCKED numbers, handed to stage 2 so it
+    voices the real result. Names the score, tier, each subscore, and any missing
+    must-haves — everything the voice pass needs and nothing it could recompute."""
+    lines = [f"Overall: {data.get('score')} / 100  (tier: {data.get('tier')})"]
+    named = {
+        "technical_skills": "Technical Alignment", "experience": "Experience",
+        "domain_fit": "Domain Fit", "impact": "Impact & Results",
+        "recency": "Skill Recency", "education": "Education & Fundamentals",
+        "communication": "Communication & Collaboration",
+    }
+    for k, label in named.items():
+        if isinstance(data.get(k), (int, float)):
+            lines.append(f"- {label}: {data[k]}")
+    missing = [str(m).strip() for m in (data.get("missing_must_haves") or []) if str(m).strip()]
+    if missing:
+        lines.append("Missing must-haves (name these as real blockers): " + ", ".join(missing))
+    else:
+        lines.append("Missing must-haves: none — all hard requirements are met.")
+    ev = data.get("_evidence") or {}
+    if ev.get("strongest"):
+        lines.append(f"Strongest area: {ev['strongest']}")
+    if ev.get("weakest"):
+        lines.append(f"Weakest area: {ev['weakest']}")
+    return "\n".join(lines)
+
+
+def _run_score_stage2(source, posting_ctx, scored_data):
+    """Stage 2: full Silver Wolf voice pass over the LOCKED numbers. Returns a dict
+    of text fields (_en/_zh) or None. Blocking — call via to_thread. Slightly warmer
+    temperature so the voice has life; it changes no numbers (they're not in the
+    output schema)."""
+    prompt = _SCORE_VOICE_PROMPT.format(
+        scored=_scored_summary_for_voice(scored_data), posting=posting_ctx
+    )
+    kind, payload = source
+    if kind == "text":
+        full = f"{prompt}\n\n<resume>\n{payload}\n</resume>"
+        return gemma_client.ask_json_text(
+            full, 4000, temperature=0.45, chain=gemma_client.FAST_CHAIN
+        )
+    return gemma_client.ask_json_with_image(payload, prompt, 4000, temperature=0.45)
+
+
+# Text fields stage 2 produces — merged onto the locked numbers to form the final
+# score dict the embed builder consumes.
+_VOICE_FIELDS = (
+    "summary_en", "summary_zh", "highest_reason_en", "highest_reason_zh",
+    "lowest_reason_en", "lowest_reason_zh", "why_not_higher_en", "why_not_higher_zh",
+    "strengths_en", "strengths_zh", "gaps_en", "gaps_zh",
+    "quick_wins_en", "quick_wins_zh", "improvements_en", "improvements_zh",
+)
+
+
+async def _score_two_stage(source, posting_ctx):
+    """The two-stage scorer: silent numeric stage 1 → deterministic overall + cap →
+    full-persona voice stage 2 → merged final dict (same shape the embed expects, and
+    the same shape the old single call produced). Returns None on a hard failure."""
+    stage1 = await asyncio.to_thread(_run_score_stage1, source, posting_ctx)
+    if not isinstance(stage1, dict):
+        return None
+    overall = _compute_overall(stage1)
+    if overall is None:
+        return None
+
+    # Assemble the numeric spine, then run the deterministic must-have cap on it.
+    data = {"score": overall, "tier": _tier_for(overall)}
+    for k in _ALL_SUBSCORE_KEYS:
+        if isinstance(stage1.get(k), (int, float)):
+            data[k] = int(stage1[k])
+    data["missing_must_haves"] = []  # filled by the code matcher in run_score
+    data["_stage1_must_haves"] = stage1.get("must_haves") or []
+    data["_evidence"] = stage1.get("evidence") or {}
+
+    # Voice pass over whatever the numbers turn out to be AFTER the cap — so run_score
+    # applies the cap between the two stages (see run_score). Here we just return the
+    # numeric spine; run_score caps, then calls _voice_fill.
+    return data
+
+
+async def _voice_fill(source, posting_ctx, data):
+    """Run stage 2 and merge its text fields onto the (already-capped) numeric dict.
+    On voice failure, leaves the numbers intact with minimal fallback text so the
+    score still renders."""
+    voiced = await asyncio.to_thread(_run_score_stage2, source, posting_ctx, data)
+    if isinstance(voiced, dict):
+        for f in _VOICE_FIELDS:
+            if f in voiced:
+                data[f] = voiced[f]
+    if not data.get("summary_en"):
+        # Minimal, honest bilingual fallback so a voice-call miss doesn't blank the
+        # report or break the paired _en/_zh contract the embed builder expects.
+        score, tier = data.get("score"), data.get("tier")
+        data["summary_en"] = (
+            f"Scanned your build — lands at {score} ({tier}) for this role."
+        )
+        data.setdefault(
+            "summary_zh", f"扫了下你的档——这个岗位算下来 {score} 分（{tier}）。"
+        )
+    # Drop internal-only keys before caching/rendering.
+    data.pop("_evidence", None)
+    data.pop("_stage1_must_haves", None)
+    return data
+
+
+async def run_score(db, user, table, row_id, progress=None, on_numbers=None):
     """Resume-vs-this-posting match. Returns (embed, file, error) — file is the
     score-wheel PNG (or None). Cached per (user, job): a repeat click skips
     Gemma entirely and returns instantly. Cache is cleared on resume change.
@@ -1025,6 +1432,13 @@ async def run_score(db, user, table, row_id):
     if not row:
         return None, None, None, "That posting is no longer available."
 
+    async def _tick(i):
+        if progress is not None:
+            try:
+                await progress.phase(i)
+            except Exception:
+                pass
+
     data = None
     if uid:
         data = await asyncio.to_thread(db.get_cached_score, uid, table, row_id)
@@ -1032,32 +1446,62 @@ async def run_score(db, user, table, row_id):
     if data is None:
         if not uid:
             return None, None, None, NEED_RESUME
+        await _tick(1)  # reading résumé
         source = await _resume_source(db, uid)
         if not source:
             return None, None, None, NEED_RESUME
 
         posting_ctx = _job_context(row)
-        prompt = _SCORE_PROMPT.format(posting=posting_ctx)
-        # Cap is generous: Gemma's JSON mode can silently burn budget and return
-        # empty at a tight cap (2000) yet completes cleanly at ~270 tokens with
-        # 4000. Billing is on actual output, so the headroom is free.
-        # Run the focused must-have detector CONCURRENTLY with the score — it's the
-        # reliable source of the missing list (the score JSON under-reports it).
-        data, detected_missing = await asyncio.gather(
-            _ask_json_resume(source, prompt, 4000),
-            asyncio.to_thread(_detect_missing_must_haves, source, posting_ctx),
-        )
-        if not data:
-            return None, None, None, "The AI couldn't score the match right now — try again later."
 
-        # Prefer the dedicated detector's missing list over the score JSON's own
-        # (which is unreliable); then deterministically clamp the score from it.
-        if detected_missing is not None:
-            data["missing_must_haves"] = detected_missing
-        _apply_must_have_cap(data)
-        # Make the advice name the REAL blockers: ensure each detected missing
-        # must-have shows up as a gap + a concrete "learn/build it" quick win.
-        _inject_gap_advice(data)
+        if SCORE_TWO_STAGE:
+            # Stage 1: silent numeric scorer (temp 0) → Python computes the overall
+            # from the model's weights. The must-have list comes from stage 1 too,
+            # then CODE decides present/missing (the reliable path).
+            await _tick(2)  # scoring against the posting (stage 1)
+            data = await _score_two_stage(source, posting_ctx)
+            if not data:
+                return None, None, None, "The AI couldn't score the match right now — try again later."
+            # Deterministic present/missing from stage-1's extracted must-haves,
+            # matched against the résumé text in code (same matcher as before).
+            await _tick(3)  # checking must-haves
+            kind, payload = source
+            if kind == "text" and payload:
+                data["missing_must_haves"] = [
+                    mh for mh in (data.get("_stage1_must_haves") or [])
+                    if str(mh).strip() and not _resume_has_tech(payload, str(mh))
+                ]
+            # Clamp the overall from the missing list — numbers are now LOCKED.
+            _apply_must_have_cap(data)
+            # Show the number EARLY: the score wheel + tier + subscores are ready
+            # now (~2.4s), before the slower voice pass. The caller can render this
+            # interim so the user sees their score at half the total wait.
+            if on_numbers is not None:
+                try:
+                    await on_numbers(dict(data), row)
+                except Exception:
+                    pass
+            await _tick(4)  # writing up the read (stage 2 voice)
+            data = await _voice_fill(source, posting_ctx, data)
+            _inject_gap_advice(data)
+            await _tick(5)  # finalizing
+        else:
+            # Legacy single-call path (SCORE_TWO_STAGE=0). Cap is generous: Gemma's
+            # JSON mode can silently burn budget and return empty at a tight cap yet
+            # completes cleanly with 4000. Missing detector runs concurrently.
+            await _tick(2)
+            prompt = _SCORE_PROMPT.format(posting=posting_ctx)
+            data, detected_missing = await asyncio.gather(
+                _ask_json_resume(source, prompt, 4000),
+                asyncio.to_thread(_detect_missing_must_haves, source, posting_ctx),
+            )
+            if not data:
+                return None, None, None, "The AI couldn't score the match right now — try again later."
+            await _tick(4)
+            if detected_missing is not None:
+                data["missing_must_haves"] = detected_missing
+            _apply_must_have_cap(data)
+            _inject_gap_advice(data)
+            await _tick(5)
 
         await asyncio.to_thread(db.set_cached_score, uid, table, row_id, data)
 
@@ -2314,33 +2758,96 @@ def make_progress_updater(interaction, verb="Rewriting your résumé"):
     return progress
 
 
-_SCORE_STATUS_STEPS = [
-    "🐺 Cracking open your build…",
-    "🔍 Reading your résumé…",
-    "⚖️ Scoring it against the posting…",
-    "🎯 Checking the must-haves…",
-    "✍️ Writing up the read…",
+# Real phases of a score run (two-stage). The animator advances the bar to each
+# phase's floor as it's reached, and creeps GENTLY toward the next floor while a
+# phase is in flight — so the bar reflects true progress and never looks frozen.
+# (label, floor%) — floors are the % the bar jumps to when that phase STARTS.
+_SCORE_PHASES = [
+    ("🐺 Cracking open your build…", 6),
+    ("🔍 Reading your résumé…", 15),
+    ("⚖️ Scoring against the posting…", 30),
+    ("🎯 Checking the must-haves…", 62),
+    ("✍️ Writing up the read…", 78),
+    ("✨ Finalizing…", 96),
 ]
 
 
-async def _score_status_loop(interaction, stop, period=2.2):
-    """Cycle a live status line on the deferred message while the score runs, so a
-    single ~10s call doesn't look frozen. Stops when `stop` is set. Best-effort."""
-    i = 0
-    while not stop.is_set():
+def _score_bar(pct, width=14):
+    """A filled progress bar like '▰▰▰▰▱▱▱▱▱▱  42%'."""
+    pct = max(0, min(100, int(pct)))
+    filled = round(pct / 100 * width)
+    return f"{'▰' * filled}{'▱' * (width - filled)}  {pct}%"
+
+
+class _ScoreProgress:
+    """Drives a real, monotonic score progress bar. `phase(i)` jumps the bar to
+    phase i's floor; a background creep advances it slowly toward the NEXT floor
+    while that phase runs, so the bar keeps moving even during a long AI call. All
+    edits are best-effort — a dropped edit never affects the actual scoring."""
+
+    def __init__(self, interaction):
+        self.interaction = interaction
+        self.idx = 0
+        self.pct = 0
+        self._stop = asyncio.Event()
+        self._task = None
+        self._frozen = False  # once stopped, no more bar edits (so an interim/final render isn't clobbered by a trailing tick)
+
+    def _label(self):
+        return _SCORE_PHASES[min(self.idx, len(_SCORE_PHASES) - 1)][0]
+
+    def _next_floor(self):
+        # the ceiling the creep may drift toward = the NEXT phase's floor - 1
+        if self.idx + 1 < len(_SCORE_PHASES):
+            return _SCORE_PHASES[self.idx + 1][1] - 1
+        return 99
+
+    async def _render(self):
+        if self._frozen:
+            return  # stopped — don't clobber an interim/final render with a bar
         try:
-            await interaction.edit_original_response(
-                content=_SCORE_STATUS_STEPS[i % len(_SCORE_STATUS_STEPS)],
-                embed=None,
-                view=None,
+            await self.interaction.edit_original_response(
+                content=f"{self._label()}\n{_score_bar(self.pct)}",
+                embed=None, view=None,
             )
         except Exception:
-            return
-        i += 1
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=period)
-        except asyncio.TimeoutError:
-            continue
+            pass
+
+    async def start(self):
+        self.pct = _SCORE_PHASES[0][1]
+        await self._render()
+        self._task = asyncio.create_task(self._creep())
+
+    async def phase(self, i):
+        """Advance to phase i (monotonic — never goes backward)."""
+        self.idx = max(self.idx, i)
+        self.pct = max(self.pct, _SCORE_PHASES[min(i, len(_SCORE_PHASES) - 1)][1])
+        await self._render()
+
+    async def _creep(self):
+        """Drift the bar upward within the current phase so it never looks stuck.
+        Each ~1.3s tick nudges pct a third of the way to the current phase's
+        ceiling (the next phase's floor), decelerating as it approaches — so it
+        keeps moving but never overshoots into the next phase's territory."""
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=1.3)
+                return  # stop was set
+            except asyncio.TimeoutError:
+                pass
+            ceiling = self._next_floor()
+            if self.pct < ceiling:
+                self.pct = min(ceiling, self.pct + max(1, (ceiling - self.pct) // 3))
+                await self._render()
+
+    async def stop(self):
+        self._frozen = True  # block any further bar renders (idempotent)
+        self._stop.set()
+        if self._task:
+            try:
+                await self._task
+            except Exception:
+                pass
 
 
 def _jump_button(interaction):
@@ -2373,16 +2880,38 @@ async def run_score_with_status(db, user, table, row_id, interaction):
     interaction must already be deferred (thinking)."""
     import discord
 
-    stop = asyncio.Event()
-    animator = asyncio.create_task(_score_status_loop(interaction, stop))
-    try:
-        embed, file, view, error = await run_score(db, user, table, row_id)
-    finally:
-        stop.set()
+    prog = _ScoreProgress(interaction)
+    await prog.start()
+
+    # Early-reveal: the moment the numbers are locked (~2.4s, before the slower
+    # voice pass), show the score wheel + tier + subscores so the user sees their
+    # result at roughly half the total wait. The full Silver Wolf text replaces it
+    # when stage 2 finishes. Best-effort — a failed interim never blocks the final.
+    shown_interim = {"done": False}
+
+    async def _on_numbers(numbers, row):
         try:
-            await animator
+            await prog.stop()  # numbers are in; freeze the bar and show the score
+            embed, sc = _build_score_embed(row, numbers, "en")
+            note = "\n-# ✍️ Silver Wolf's still writing the full read…"
+            if embed.description:
+                embed.description = (embed.description + note)[:4096]
+            kwargs = {"content": None, "embed": embed, "view": None}
+            if sc is not None:
+                png = await asyncio.to_thread(score_wheel.render, sc)
+                embed.set_thumbnail(url="attachment://score.png")
+                kwargs["attachments"] = [discord.File(io_bytes(png), filename="score.png")]
+            await interaction.edit_original_response(**kwargs)
+            shown_interim["done"] = True
         except Exception:
             pass
+
+    try:
+        embed, file, view, error = await run_score(
+            db, user, table, row_id, progress=prog, on_numbers=_on_numbers
+        )
+    finally:
+        await prog.stop()
     if error:
         await interaction.edit_original_response(content=error, embed=None, view=None)
         return

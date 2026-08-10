@@ -250,6 +250,14 @@ _SAMPLE_POSTING = {
 def register(bot, *, logger=None):
     admin = discord.app_commands.default_permissions(administrator=True)
 
+    # All dev/test commands live under one admin-only /test group so they don't
+    # clutter the top-level list and regular users never see them.
+    group = discord.app_commands.Group(
+        name="test",
+        description="(Admin) Developer preview/test commands",
+        default_permissions=discord.Permissions(administrator=True),
+    )
+
     def _render_score(row, data):
         """Build the real Score embed + wheel + toggle from score JSON `data`."""
         from commands import score_wheel
@@ -275,8 +283,8 @@ def register(bot, *, logger=None):
         view = lang_view.LangToggleView(build, lang="en", make_file=make_file)
         return build("en"), make_file(), view
 
-    @bot.tree.command(
-        name="testscore",
+    @group.command(
+        name="score",
         description="[test] LIVE: real AI scores a sample résumé (see the actual Silver Wolf voice + 5 subscores)",
     )
     @admin
@@ -297,8 +305,8 @@ def register(bot, *, logger=None):
             kwargs["file"] = file
         await interaction.followup.send(**kwargs)
 
-    @bot.tree.command(
-        name="testscore_layout",
+    @group.command(
+        name="score_layout",
         description="[test] Instant layout preview with fake data (no AI)",
     )
     @admin
@@ -309,8 +317,8 @@ def register(bot, *, logger=None):
             kwargs["file"] = file
         await interaction.response.send_message(**kwargs)
 
-    @bot.tree.command(
-        name="testtailor",
+    @group.command(
+        name="tailor",
         description="[test] Preview the Tailor embed — build + Silver Wolf's review in one (bilingual)",
     )
     @admin
@@ -324,8 +332,8 @@ def register(bot, *, logger=None):
             kwargs["file"] = file
         await interaction.followup.send(**kwargs)
 
-    @bot.tree.command(
-        name="testtailor_live",
+    @group.command(
+        name="tailor_live",
         description="[test] LIVE: really tailor the sample résumé — one embed: image + review + before→after+why",
     )
     @admin
@@ -362,7 +370,7 @@ def register(bot, *, logger=None):
             kwargs["file"] = file
         await interaction.followup.send(**kwargs)
 
-    @bot.tree.command(name="testguide", description="[test] Preview the bilingual command guide")
+    @group.command(name="guide", description="[test] Preview the bilingual command guide")
     @admin
     async def testguide(interaction: discord.Interaction):
         view = lang_view.LangToggleView(
@@ -371,8 +379,8 @@ def register(bot, *, logger=None):
         await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
 
     # --- /reviewresume — LIVE (real AI on the sample résumé) --------------
-    @bot.tree.command(
-        name="testreview",
+    @group.command(
+        name="review",
         description="[test] LIVE: real AI reviews a sample résumé (actual Silver Wolf voice)",
     )
     @admin
@@ -409,7 +417,7 @@ def register(bot, *, logger=None):
             embed=ai_commands._answer_embed(title[:256], answer, color), ephemeral=True
         )
 
-    @bot.tree.command(name="testhelpme", description="[test] LIVE: run /helpme's real prompt")
+    @group.command(name="helpme", description="[test] LIVE: run /helpme's real prompt")
     @admin
     @discord.app_commands.describe(question="Ask something (default: a sample question)")
     async def testhelpme(interaction: discord.Interaction, question: str = None):
@@ -425,7 +433,7 @@ def register(bot, *, logger=None):
         )
         await _live(interaction, prompt, f"💬 /helpme — {q[:60]}", discord.Color.blurple())
 
-    @bot.tree.command(name="testinterview", description="[test] LIVE: run /interview's real prompt")
+    @group.command(name="interview", description="[test] LIVE: run /interview's real prompt")
     @admin
     @discord.app_commands.describe(role="Role/company (default: a sample role)")
     async def testinterview(interaction: discord.Interaction, role: str = None):
@@ -443,7 +451,7 @@ def register(bot, *, logger=None):
         )
         await _live(interaction, prompt, f"🎤 /interview — {r}", discord.Color.teal())
 
-    @bot.tree.command(name="testrecommend", description="[test] LIVE: run /recommend on a sample menu")
+    @group.command(name="recommend", description="[test] LIVE: run /recommend on a sample menu")
     @admin
     async def testrecommend(interaction: discord.Interaction):
         menu = (
@@ -464,3 +472,10 @@ def register(bot, *, logger=None):
             + "\n\nOPEN INTERNSHIPS:\n" + menu
         )
         await _live(interaction, prompt, "🧭 /recommend (sample)", discord.Color.gold())
+
+    bot.tree.add_command(group)
+    if logger:
+        logger.info(
+            "Registered /test group (score, score_layout, tailor, tailor_live, "
+            "guide, review, helpme, interview, recommend) — admin-only"
+        )
