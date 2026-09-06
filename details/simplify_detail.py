@@ -180,17 +180,38 @@ def _salary(posting: dict) -> tuple[int | None, int | None, str | None]:
     return comp_min, comp_max, desc
 
 
+# Field-label / metadata lines that lead many postings ('Date Posted:',
+# 'Security Clearance Type:', 'Location:') are NOT the role summary. They read
+# as a short 'Label:' or 'Label: value' with no sentence — skip until the first
+# line of real prose.
+def _is_prose(text: str) -> bool:
+    """A real summary sentence, not a metadata label. Rejects short lines,
+    'Label:' headers, and 'Label: value' pairs; requires sentence-like length
+    and actual sentence punctuation or a clause of several words."""
+    if not text or len(text) < 40:
+        return False
+    if text.rstrip().endswith(":"):
+        return False
+    # 'Label: value' metadata — a short key before the first colon.
+    head, sep, _ = text.partition(":")
+    if sep and len(head.split()) <= 4:
+        return False
+    # Needs to read like prose: a sentence-ending mark or a decent word count.
+    return ("." in text) or (len(text.split()) >= 12)
+
+
 def _summary(posting: dict) -> str | None:
-    """First paragraph of the description, falling back to a flat prefix."""
+    """First real prose block of the description — skipping the leading metadata
+    labels ('Date Posted:', clearance/citizenship headers) — falling back to the
+    flat text prefix."""
     description = posting.get("description") or ""
     if not description:
         return None
 
     soup = BeautifulSoup(description, "html.parser")
-    first = soup.find("p")
-    if first:
-        text = first.get_text(" ", strip=True)
-        if text:
+    for node in soup.find_all(["p", "div", "span"]):
+        text = node.get_text(" ", strip=True)
+        if _is_prose(text):
             return text
 
     plain = soup.get_text(" ", strip=True)
@@ -234,10 +255,10 @@ def _is_closed(posting: dict) -> bool:
 def _from_posting(posting: dict) -> dict:
     comp_min, comp_max, salary_desc = _salary(posting)
 
-    # `desirable` is simplify's nice-to-have bucket; it has no column of its
-    # own, and it reads naturally alongside the hard requirements.
+    # `requirements` = hard must-haves; `desirable` = nice-to-haves. Keep them
+    # in separate columns so the embed can show Required vs Preferred distinctly.
     requirements = _unique_strings(posting.get("requirements"))
-    requirements.extend(_unique_strings(posting.get("desirable")))
+    preferred = _unique_strings(posting.get("desirable"))
 
     benefits = []
     if posting.get("sponsors_h1b") is True:
@@ -250,6 +271,7 @@ def _from_posting(posting: dict) -> dict:
         "job_summary": _summary(posting),
         "job_responsibilities": _unique_strings(posting.get("responsibilities")),
         "job_requirements": _unique_strings(requirements),
+        "job_preferred": _unique_strings(preferred),
         "job_benefits": _unique_strings(benefits),
         "comp_min": comp_min,
         "comp_max": comp_max,

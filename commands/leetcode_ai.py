@@ -415,6 +415,41 @@ Now return the JSON."""
 
 
 # --- /explaincode : debug the user's own attempt -----------------------------
+def answer_followup(pattern_name, question, knowledge=None):
+    """Answer a student's follow-up question about a pattern they're LEARNING, in
+    Silver Wolf's voice, grounded in the pattern's facts (and the doc knowledge
+    when supplied). Uses a pure Flash-lite chain — light, fast, interactive. Stays
+    strictly truthful (no invented APIs/complexities); if the question is off-topic
+    or unclear, says so briefly. Returns a short plain-text answer (2-5 sentences),
+    or None."""
+    if not question or not question.strip():
+        return None
+    from commands.gemma_client import LITE_CHAIN
+
+    prompt = f"""{_PERSONA}
+
+The student is LEARNING the "{pattern_name}" pattern and asked a FOLLOW-UP question.
+Answer it directly and clearly, in Silver Wolf's voice, as a quick coaching reply —
+2-5 sentences, plain and useful. Stay 100% technically accurate for this pattern:
+never invent a complexity, API, or fact. If the question isn't about this pattern
+(or DS&A at all), say so briefly in-character and nudge them back. No markdown
+headers, no code fences unless a 1-2 line snippet genuinely helps.
+
+{_knowledge_block(knowledge)}
+
+--- PATTERN ---
+{pattern_name}
+--- QUESTION ---
+{question.strip()[:500]}
+--- END ---
+
+Now write only the answer."""
+    ans = gemma_client.ask_text(prompt, chain=LITE_CHAIN)
+    if not ans or not ans.strip():
+        return None
+    return ans.strip()[:1000]
+
+
 def explain_user_code(code, problem=None):
     """Silver Wolf reviews the USER'S code: what it does, is it correct, what's its
     complexity, why it's slow/buggy, and the concrete fix — WITHOUT just handing

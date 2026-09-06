@@ -247,7 +247,7 @@ _SAMPLE_POSTING = {
 }
 
 
-def register(bot, *, logger=None):
+def register(bot, *, logger=None, get_db=None):
     admin = discord.app_commands.default_permissions(administrator=True)
 
     # All dev/test commands live under one admin-only /test group so they don't
@@ -472,6 +472,46 @@ def register(bot, *, logger=None):
             + "\n\nOPEN INTERNSHIPS:\n" + menu
         )
         await _live(interaction, prompt, "🧭 /recommend (sample)", discord.Color.gold())
+
+    @group.command(
+        name="persona",
+        description="(Admin) Turn the Silver Wolf persona on/off, or reset to default",
+    )
+    @discord.app_commands.describe(
+        mode="on = Silver Wolf voice · off = neutral professional · default = use env setting"
+    )
+    @discord.app_commands.choices(
+        mode=[
+            discord.app_commands.Choice(name="On (Silver Wolf)", value="on"),
+            discord.app_commands.Choice(name="Off (neutral professional)", value="off"),
+            discord.app_commands.Choice(name="Default (env setting)", value="default"),
+        ]
+    )
+    async def persona_cmd(
+        interaction: discord.Interaction,
+        mode: discord.app_commands.Choice[str],
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        from commands import persona as _persona
+
+        value = {"on": True, "off": False, "default": None}[mode.value]
+        # Persist (survives restarts) + apply live this session.
+        db = get_db() if get_db else None
+        if db is not None:
+            await asyncio.to_thread(db.set_persona_override, value)
+        _persona.set_persona_override(value)
+
+        now = "ON — Silver Wolf" if _persona.persona_enabled() else "OFF — neutral professional"
+        if value is None:
+            note = (
+                f"Persona override cleared — now following the server default "
+                f"(`SILVER_WOLF_PERSONA` env). Currently **{now}**."
+            )
+        else:
+            note = f"Persona set to **{now}**. Applies to all new AI responses."
+        if db is None:
+            note += "\n⚠️ No DB — this won't persist across a restart."
+        await interaction.followup.send(note, ephemeral=True)
 
     bot.tree.add_command(group)
     if logger:

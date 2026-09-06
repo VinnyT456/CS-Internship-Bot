@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS public.internships (
     job_summary TEXT,
     job_responsibilities TEXT[],
     job_requirements TEXT[],
+    job_preferred TEXT[],
     job_benefits TEXT[],
     job_tags TEXT[],
     comp_min INTEGER,             -- annualized thousands (125 = $125k/yr)
@@ -77,6 +78,7 @@ CREATE TABLE IF NOT EXISTS public.new_grads (
     job_summary TEXT,
     job_responsibilities TEXT[],
     job_requirements TEXT[],
+    job_preferred TEXT[],
     job_benefits TEXT[],
     job_tags TEXT[],
     comp_min INTEGER,             -- annualized thousands (125 = $125k/yr)
@@ -103,9 +105,41 @@ CREATE TABLE IF NOT EXISTS public.users (
     discord_id BIGINT UNIQUE NOT NULL,
     username TEXT,
     display_name TEXT,
+    -- GitHub username the user set for /resume github repo analysis. Persists
+    -- even when their résumé has no GitHub link. Run this ALTER on existing DBs:
+    github_username TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- Migration for an EXISTING users table (safe to re-run):
+ALTER TABLE IF EXISTS public.users
+    ADD COLUMN IF NOT EXISTS github_username TEXT;
+
+-- Migration: split preferred (nice-to-have) quals into their own column so the
+-- posting embed can show Required vs Preferred distinctly (safe to re-run):
+ALTER TABLE IF EXISTS public.internships
+    ADD COLUMN IF NOT EXISTS job_preferred TEXT[];
+ALTER TABLE IF EXISTS public.new_grads
+    ADD COLUMN IF NOT EXISTS job_preferred TEXT[];
+
+-- Structured, ATS-extracted summary of each of a user's GitHub projects, filled
+-- by /resume github. One row per (user, repo); a re-scan upserts the row. Used to
+-- surface the right projects for a role without re-scanning GitHub every time.
+--   category ∈ {AI/ML, Web Dev, Mobile App, Data Science, Systems/Backend,
+--               DevOps/Infra, Game, Other}  (model picks exactly one)
+--   finished_at = the repo's last-commit day (pushed_at)
+CREATE TABLE IF NOT EXISTS public.github_projects (
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    repo_name TEXT NOT NULL,
+    summary TEXT,
+    tech TEXT[] DEFAULT '{}',
+    category TEXT,
+    finished_at DATE,
+    url TEXT,
+    scanned_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (user_id, repo_name)
+);
+ALTER TABLE IF EXISTS public.github_projects DISABLE ROW LEVEL SECURITY;
 
 -- Uploaded resumes. Users upload a PDF (pdf_path); the bot rasterizes it to a
 -- single stacked PNG (image_path) in the Resumes bucket — the image is what the
@@ -249,3 +283,26 @@ CREATE TABLE IF NOT EXISTS public.leetcode_learned (
 );
 
 ALTER TABLE IF EXISTS public.leetcode_learned DISABLE ROW LEVEL SECURITY;
+
+-- Per-user personalized study ORDER for the DS&A roadmap. One row per user; the
+-- `sequence` array is the ordered list of pattern keys the user progresses
+-- through (seeded from the roadmap's topological/prereq order on first view).
+-- "Done" is NOT stored here — it stays in leetcode_learned (single source of
+-- truth). The next topic = the first entry in `sequence` not yet in
+-- leetcode_learned (queue popleft semantics), so the two can never drift.
+CREATE TABLE IF NOT EXISTS public.leetcode_roadmap_queue (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    sequence TEXT[] NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE IF EXISTS public.leetcode_roadmap_queue DISABLE ROW LEVEL SECURITY;
+
+-- Simple key/value store for server-wide bot settings that admins flip at
+-- runtime (persisted across restarts). Currently holds `silver_wolf_persona`
+-- ("on"/"off") set by /test persona; NULL/absent = defer to the env default.
+CREATE TABLE IF NOT EXISTS public.bot_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE IF EXISTS public.bot_settings DISABLE ROW LEVEL SECURITY;

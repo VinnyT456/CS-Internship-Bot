@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import re
 from html import unescape
 
 import httpx
@@ -89,6 +90,14 @@ def get_problem(id_or_slug):
 def _normalize(q):
     """Map a raw API question object to the fields the bot uses."""
     slug = (q.get("titleSlug") or q.get("slug") or "").strip()
+    # The /problem/{id_or_slug} endpoint omits titleSlug/slug but carries a `url`
+    # (https://leetcode.com/problems/<slug>/) — recover the slug from it so the
+    # Reveal button (custom_id leet:reveal:<slug>) still works on manual fetches.
+    if not slug:
+        url = q.get("url") or ""
+        m = re.search(r"/problems/([^/]+)", url)
+        if m:
+            slug = m.group(1).strip()
     snippets = {
         s.get("langSlug"): s.get("code")
         for s in (q.get("codeSnippets") or [])
@@ -142,6 +151,53 @@ def problems_by_difficulty(difficulty=None, limit=50, skip=0):
         return [], 0
     rows = [_list_row(p) for p in raw.get("problems", []) if not p.get("paid_only")]
     return rows, int(raw.get("total") or len(rows))
+
+
+# --- slug → difficulty index (for annotating company problem lists) ----------
+# Built lazily from the /problems/filter list endpoint (paginated), cached for the
+# process. Lets /leetcode company show a difficulty dot per problem WITHOUT 15
+# per-problem HTTP fetches — one warm-up, then O(1) lookups. Best-effort: any
+# failure leaves the index empty and difficulty is simply omitted (⚪ dot).
+_difficulty_map = None
+
+
+def _difficulty_index():
+    """{slug: 'Easy'|'Medium'|'Hard'} for all problems, built once and cached.
+    Returns {} on failure (caller degrades gracefully)."""
+    global _difficulty_map
+    if _difficulty_map is not None:
+        return _difficulty_map
+    index = {}
+    try:
+        page, skip = 500, 0
+        # The list endpoint reports `total`; page through it a bounded number of
+        # times so a huge/looping response can't hang the warm-up.
+        for _ in range(12):
+            raw = _get(f"/problems/filter?limit={page}&skip={skip}")
+            if not isinstance(raw, dict):
+                break
+            problems = raw.get("problems") or []
+            if not problems:
+                break
+            for p in problems:
+                slug = (p.get("title_slug") or p.get("titleSlug") or "").strip()
+                diff = (p.get("difficulty") or "").strip()
+                if slug and diff:
+                    index[slug] = diff
+            skip += page
+            if skip >= int(raw.get("total") or 0):
+                break
+    except Exception:
+        logger.exception("failed building difficulty index")
+    _difficulty_map = index  # cache even a partial/empty result (avoid re-hammering)
+    return _difficulty_map
+
+
+def difficulty_for(slug):
+    """Difficulty string for a slug ('Easy'/'Medium'/'Hard'), or '' if unknown."""
+    if not slug:
+        return ""
+    return _difficulty_index().get(slug, "")
 
 
 def problems_by_tag(tag_slug, limit=50, skip=0):
@@ -276,11 +332,61 @@ def _load_roadmap():
     return _roadmap
 
 
+def _raw_patterns():
+    """Patterns straight from the JSON (no computed tier). Internal — used to
+    compute the learning sequence without recursing through roadmap_patterns."""
+    return _load_roadmap().get("patterns", [])
+
+
+# Cache the computed sequence/tiers per process (the roadmap JSON is static).
+_SEQUENCE_CACHE = None
+_TIER_CACHE = None
+
+
 def roadmap_patterns():
-    """All roadmap patterns, in tier order then declared order. Each is the full
-    dict (key, name, category, tier, prereqs, tag, examples)."""
-    pats = _load_roadmap().get("patterns", [])
-    return sorted(pats, key=lambda p: (p.get("tier", 99),))
+    """All roadmap patterns, ordered by the LEARNING SEQUENCE (commonality-then-
+    difficulty, prereq-respecting). Each pattern's `tier` is OVERWRITTEN with a
+    display band computed from that sequence, so tiers reflect the gradual
+    difficulty/commonality ramp rather than the hand-set JSON value. Full dict:
+    key, name, category, tier, prereqs, recommended, tag, examples."""
+    global _SEQUENCE_CACHE, _TIER_CACHE
+    raw = _raw_patterns()
+    if _SEQUENCE_CACHE is None:
+        _SEQUENCE_CACHE = _compute_sequence(raw)
+        n = max(1, len(_SEQUENCE_CACHE))
+        _TIER_CACHE = {k: min(5, 1 + (i * 5) // n)
+                       for i, k in enumerate(_SEQUENCE_CACHE)}
+    order = {k: i for i, k in enumerate(_SEQUENCE_CACHE)}
+    out = []
+    for p in raw:
+        q = dict(p)
+        q["tier"] = _TIER_CACHE.get(p["key"], p.get("tier", 99))
+        out.append(q)
+    out.sort(key=lambda p: (p["tier"], order.get(p["key"], 999)))
+    return out
+
+
+def _compute_sequence(raw):
+    """Kahn's algorithm over the raw patterns: repeatedly place the READY pattern
+    (all core prereqs already placed) that ranks best by (commonality desc,
+    difficulty asc, declared order). Prereq-valid AND difficulty/commonality-
+    graded. Returns a list of keys."""
+    by_key = {p["key"]: p for p in raw}
+    decl = {p["key"]: i for i, p in enumerate(raw)}
+    remaining = set(by_key)
+    placed = set()
+    out = []
+    while remaining:
+        ready = [k for k in remaining
+                 if all(q in placed for q in (by_key[k].get("prereqs") or []))]
+        if not ready:
+            ready = list(remaining)
+        ready.sort(key=lambda k: (_pattern_weight(by_key[k]), decl[k]))
+        pick = ready[0]
+        out.append(pick)
+        placed.add(pick)
+        remaining.discard(pick)
+    return out
 
 
 def roadmap_categories():
@@ -340,6 +446,68 @@ def roadmap_pattern(key):
     return None
 
 
+# --- Learn-only advanced topic pool (segment tree, dijkstra, KMP, …) ----------
+# Taught via /learn + /pattern but NOT part of the roadmap graph. Loaded once.
+_ADVANCED_PATH = os.path.join(os.path.dirname(__file__), "advanced_topics.json")
+_advanced = None
+
+
+def _load_advanced():
+    global _advanced
+    if _advanced is None:
+        try:
+            with open(_ADVANCED_PATH, encoding="utf-8") as f:
+                _advanced = json.load(f)
+        except Exception:
+            logger.exception("failed loading advanced_topics.json")
+            _advanced = {"categories": [], "topics": []}
+    return _advanced
+
+
+def advanced_topics():
+    """All learn-only advanced topics (list of dicts: key, name, category, tag,
+    examples). Ordered as declared in the JSON (grouped by category)."""
+    return _load_advanced().get("topics", [])
+
+
+def advanced_categories():
+    """Category metadata for the advanced pool (key, name)."""
+    return _load_advanced().get("categories", [])
+
+
+def advanced_topic(key):
+    """One advanced topic by key or loose name/tag match, or None. Tolerant like
+    roadmap_pattern so /learn <topic> is forgiving."""
+    if not key:
+        return None
+    want = key.strip().lower()
+    want_slug = want.replace(" ", "-").replace("&", "and")
+    topics = advanced_topics()
+    by_key = {t["key"]: t for t in topics}
+    if want in by_key:
+        return by_key[want]
+    if want_slug in by_key:
+        return by_key[want_slug]
+    for t in topics:
+        name = t["name"].lower()
+        if want in name or want == t.get("tag") or want_slug == t.get("tag"):
+            return t
+    return None
+
+
+def learnable_topic(key):
+    """Resolve a /learn or /pattern topic to EITHER a roadmap pattern or an
+    advanced-pool topic. Returns (kind, dict) where kind is 'roadmap' | 'advanced',
+    or (None, None) if unknown. Roadmap takes precedence."""
+    p = roadmap_pattern(key)
+    if p:
+        return "roadmap", p
+    a = advanced_topic(key)
+    if a:
+        return "advanced", a
+    return None, None
+
+
 def pattern_knowledge(pattern_key):
     """Doc-grounded facts for a roadmap pattern key (signal, key_question, state,
     template, complexity, misconception, mental_model), or None if the pattern
@@ -392,3 +560,351 @@ def roadmap_next(learned_keys):
         return None
     ready = [p for p in unlearned if all(q in learned for q in p.get("prereqs", []))]
     return (ready or unlearned)[0]
+
+
+def _pattern_weight(p):
+    """Sort key for the learning order: DIFFICULTY first (easy→hard), then
+    COMMONALITY (interview frequency, high→low), then declared order as a stable
+    final tiebreak. Difficulty leads so the roadmap reads as clean difficulty
+    BANDS (easy techniques up top, harder ones at the bottom); within a band the
+    most common topic comes first. `frequency`/`difficulty` are 1-5 fields
+    (default 3 if missing). Lower tuple = learn earlier."""
+    freq = p.get("frequency", 3)
+    diff = p.get("difficulty", 3)
+    return (diff, -freq)
+
+
+def roadmap_sequence():
+    """The canonical study ORDER of all patterns: prereq-respecting, tie-broken so
+    the MOST COMMON + EASIEST ready pattern comes next (see _compute_sequence).
+    Returns a list of pattern KEYS. Seeds each user's personal roadmap queue."""
+    global _SEQUENCE_CACHE
+    if _SEQUENCE_CACHE is None:
+        roadmap_patterns()  # populates the cache
+    return list(_SEQUENCE_CACHE)
+
+
+def roadmap_progress(learned_keys):
+    """Roadmap state for rendering the progression path. Returns a dict:
+        {
+          "total": int, "learned_count": int, "percent": int,
+          "current_tier": int,           # highest tier with any learned pattern
+          "next": <pattern dict or None>,
+          "tiers": [
+             {"tier": 1, "patterns": [
+                 {**pattern, "state": "learned"|"unlocked"|"locked",
+                  "missing": [<unmet prereq NAME>, ...]}   # missing only when locked
+             ]},
+             ...
+          ]
+        }
+    A pattern is 'unlocked' when every prereq is learned (ready to study now),
+    'locked' when some prereq isn't, 'learned' when done. Pure data — the command
+    just renders it."""
+    learned = set(learned_keys or [])
+    pats = roadmap_patterns()
+    name_by_key = {p["key"]: p["name"] for p in pats}
+
+    nxt = roadmap_next(learned)
+    next_key = nxt["key"] if nxt else None
+
+    tiers = {}
+    for p in pats:
+        prereqs = p.get("prereqs", []) or []
+        if p["key"] in learned:
+            state = "learned"
+            missing = []
+        elif all(q in learned for q in prereqs):
+            state = "unlocked"
+            missing = []
+        else:
+            state = "locked"
+            missing = [name_by_key.get(q, q) for q in prereqs if q not in learned]
+        entry = {**p, "state": state, "missing": missing, "is_next": p["key"] == next_key}
+        tiers.setdefault(p.get("tier", 99), []).append(entry)
+
+    tier_list = [{"tier": t, "patterns": tiers[t]} for t in sorted(tiers)]
+    learned_tiers = [p.get("tier", 0) for p in pats if p["key"] in learned]
+    total = len(pats)
+    lc = len(learned & {p["key"] for p in pats})
+    return {
+        "total": total,
+        "learned_count": lc,
+        "percent": round(100 * lc / total) if total else 0,
+        "current_tier": max(learned_tiers) if learned_tiers else 0,
+        "next": nxt,
+        "tiers": tier_list,
+    }
+
+
+# Dependency-ordered flow of the CATEGORY clusters (foundation → downstream).
+# Drives the roadmap's panel layout so it reads as a learning path, not a grid.
+_CLUSTER_FLOW = ("data_structures", "techniques", "searching", "dp", "advanced")
+
+
+def roadmap_clusters(learned_keys):
+    """Roadmap grouped into CATEGORY clusters for the panel layout. Returns:
+        {
+          <all the roadmap_progress top-level stats>,
+          "clusters": [
+             {"key","name","emoji","learned","total",
+              "patterns": [ {**pattern, "state", "missing", "is_next"} ... ]},
+             ...   # in dependency-flow order
+          ],
+          "cluster_edges": [ (src_cat, dst_cat), ... ]   # cluster-level prereqs
+        }
+    Node state is identical to roadmap_progress; patterns within a cluster are
+    tier-ordered. cluster_edges are the DEDUPED cross-category prerequisite links
+    (an edge cat A→B means some pattern in B depends on a pattern in A)."""
+    base = roadmap_progress(learned_keys)
+    pats = roadmap_patterns()
+    cat_of = {p["key"]: p["category"] for p in pats}
+    cat_meta = {c["key"]: c for c in roadmap_categories()}
+
+    # Flatten the per-node state out of the tier view.
+    node_by_key = {}
+    for tb in base["tiers"]:
+        for p in tb["patterns"]:
+            node_by_key[p["key"]] = p
+
+    # Build clusters in flow order (unknown categories appended after).
+    order = list(_CLUSTER_FLOW) + [
+        c for c in cat_meta if c not in _CLUSTER_FLOW
+    ]
+    clusters = []
+    for ckey in order:
+        members = [node_by_key[p["key"]] for p in pats
+                   if p["category"] == ckey and p["key"] in node_by_key]
+        if not members:
+            continue
+        members.sort(key=lambda p: (p.get("tier", 99),))
+        done = sum(1 for m in members if m["state"] == "learned")
+        meta = cat_meta.get(ckey, {})
+        clusters.append({
+            "key": ckey,
+            "name": meta.get("name", ckey),
+            "emoji": meta.get("emoji", ""),
+            "learned": done,
+            "total": len(members),
+            "patterns": members,
+        })
+
+    # Cluster-level prereq edges: dedup cross-category prerequisite links.
+    edges = set()
+    for p in pats:
+        dst = p["category"]
+        for q in p.get("prereqs", []) or []:
+            src = cat_of.get(q)
+            if src and src != dst:
+                edges.add((src, dst))
+    # Order edges by the flow so drawing is deterministic.
+    flow_idx = {c: i for i, c in enumerate(order)}
+    cluster_edges = sorted(edges, key=lambda e: (flow_idx.get(e[0], 99), flow_idx.get(e[1], 99)))
+
+    return {**base, "clusters": clusters, "cluster_edges": cluster_edges}
+
+
+# Which TRACK each category belongs to when the roadmap is split into two graphs
+# (data structures vs algorithms/techniques), so each image is small + readable.
+_TRACK_OF_CATEGORY = {
+    "data_structures": "structures",
+    "advanced": "structures",   # Graphs / Tries / Union-Find are structures too...
+    "techniques": "algorithms",
+    "searching": "algorithms",
+    "dp": "algorithms",
+}
+# ...except Bit Manipulation, which lives in 'advanced' but is an algo technique.
+_TRACK_OVERRIDE = {"bit_manipulation": "algorithms"}
+
+_TRACK_META = {
+    "structures": {"name": "Data Structures", "title": "DATA STRUCTURES"},
+    "algorithms": {"name": "Algorithms & Techniques", "title": "ALGORITHMS & TECHNIQUES"},
+}
+
+
+def _track_of(pattern):
+    k = pattern["key"]
+    if k in _TRACK_OVERRIDE:
+        return _TRACK_OVERRIDE[k]
+    return _TRACK_OF_CATEGORY.get(pattern["category"], "algorithms")
+
+
+def roadmap_tracks(learned_keys, sequence=None):
+    """Split the roadmap into TWO self-contained graphs — 'structures' and
+    'algorithms' — so each renders small + readable while keeping the roadmap
+    feel. Returns:
+        {
+          ...roadmap_guidance top-level stats (now, next_up, percent, ...),
+          "tracks": {
+            "structures": {"name","title","tiers":[{tier,patterns:[...]}],
+                           "has_now": bool},
+            "algorithms": {...},
+          }
+        }
+    Each pattern node carries state/is_start/is_next_up (from guidance) PLUS
+    `cross_prereqs`: the NAMES of its prerequisites that live in the OTHER track,
+    so the renderer can show a dim '↖ needs X' ghost label instead of a dangling
+    cross-graph arrow. `has_now` flags which track holds the START-HERE pick."""
+    g = roadmap_guidance(learned_keys, sequence=sequence)
+    pats = roadmap_patterns()
+    track_of = {p["key"]: _track_of(p) for p in pats}
+    name_by_key = {p["key"]: p["name"] for p in pats}
+
+    # Pull the tagged nodes out of the guidance tier view.
+    node_by_key = {}
+    for tb in g["tiers"]:
+        for n in tb["patterns"]:
+            node_by_key[n["key"]] = n
+
+    now_key = g["now"]["key"] if g.get("now") else None
+
+    tracks = {}
+    for tkey, meta in _TRACK_META.items():
+        # Nodes in this track, grouped into tiers (preserve tier ordering).
+        tiers_map = {}
+        has_now = False
+        for p in pats:
+            if track_of[p["key"]] != tkey:
+                continue
+            node = dict(node_by_key.get(p["key"], {}))  # copy so we can annotate
+            # Cross-track prereqs → names, for the ghost label.
+            cross = [name_by_key.get(q, q)
+                     for q in (p.get("prereqs") or [])
+                     if track_of.get(q) and track_of[q] != tkey]
+            # A soft/recommended prereq in the other track is also a cross ref,
+            # but we don't clutter the ghost label with it — only hard cross deps.
+            node["cross_prereqs"] = cross
+            # In-track edges, split by strength: solid (core prereq) vs dashed
+            # (recommended). Only same-track links are drawn as arrows.
+            node["in_prereqs"] = [q for q in (p.get("prereqs") or [])
+                                  if track_of.get(q) == tkey]
+            node["in_recommended"] = [q for q in (p.get("recommended") or [])
+                                      if track_of.get(q) == tkey]
+            if node.get("key") == now_key:
+                has_now = True
+            tiers_map.setdefault(p.get("tier", 99), []).append(node)
+        tiers = [{"tier": t, "patterns": tiers_map[t]} for t in sorted(tiers_map)]
+        tracks[tkey] = {
+            "name": meta["name"], "title": meta["title"],
+            "tiers": tiers, "has_now": has_now,
+        }
+
+    # STUDY-ORDER SPINE: connect the islands. A node with NO incoming in-track
+    # edge (no core prereq, no recommended) would otherwise float. Give it a
+    # `spine_parent` = the nearest EARLIER node in the same track along the
+    # learning sequence, so you can follow arrows through every topic. This is a
+    # path-continuation link, drawn distinctly from real prereqs — it means "next
+    # in order," not "required".
+    seq = sequence or roadmap_sequence()
+    seq_idx = {k: i for i, k in enumerate(seq)}
+    for tkey, tr in tracks.items():
+        nodes = [n for tb in tr["tiers"] for n in tb["patterns"]]
+        track_keys = {n["key"] for n in nodes}
+        for n in nodes:
+            has_edge = (n.get("in_prereqs") or n.get("in_recommended")
+                        or n.get("cross_prereqs"))
+            n["spine_parent"] = None
+            if has_edge:
+                continue
+            # nearest earlier same-track node in the sequence
+            my = seq_idx.get(n["key"], 0)
+            best = None
+            for other in nodes:
+                oi = seq_idx.get(other["key"], -1)
+                if other["key"] != n["key"] and oi < my:
+                    if best is None or oi > seq_idx.get(best, -1):
+                        best = other["key"]
+            n["spine_parent"] = best
+
+    return {**{k: v for k, v in g.items() if k not in ("tiers", "clusters")},
+            "tracks": tracks}
+
+
+def roadmap_guidance(learned_keys, sequence=None):
+    """Clustered roadmap PLUS explicit 'what to do now / next' guidance. Adds:
+        {
+          ...roadmap_clusters output...,
+          "now": <pattern dict or None>,      # the single START-HERE pick
+          "next_up": [<pattern dict>, ...],   # what to practice after `now`
+          "topics_left": [<key>, ...],        # ordered, still to do
+          "topics_done": [<key>, ...],        # ordered, completed
+          # every node in clusters/tiers also gets: is_start, is_next_up
+        }
+
+    PERSONAL QUEUE mode (`sequence` given): `now` = the first pattern in the
+    user's stored study order that they haven't learned yet (queue popleft over
+    the done-set), and `next_up` = the following unlearned patterns in that same
+    order. `sequence` is the user's ordered pattern keys (see
+    db.get_or_seed_roadmap_sequence). 'Done' stays in leetcode_learned, so left/
+    done are derived here and can't drift.
+
+    Fallback (`sequence` is None): `now` = roadmap_next (lowest-tier prereq-ready
+    unlearned) and `next_up` = the one-hop-ahead patterns from the DAG."""
+    data = roadmap_clusters(learned_keys)
+    learned = set(learned_keys or [])
+    pats = roadmap_patterns()
+    valid_keys = {p["key"] for p in pats}
+    by_key = {p["key"]: p for p in pats}
+
+    topics_left, topics_done = [], []
+    if sequence:
+        # Personal queue: keep only known keys, dedup, and append any roadmap
+        # pattern the stored sequence is missing (e.g. a newly-added pattern) in
+        # topo order so nothing is unreachable.
+        seen = set()
+        seq = []
+        for k in sequence:
+            if k in valid_keys and k not in seen:
+                seq.append(k)
+                seen.add(k)
+        for k in roadmap_sequence():
+            if k not in seen:
+                seq.append(k)
+                seen.add(k)
+
+        for k in seq:
+            (topics_done if k in learned else topics_left).append(k)
+
+        now = by_key.get(topics_left[0]) if topics_left else None
+        next_up = [by_key[k] for k in topics_left[1:4]]
+    else:
+        now = data.get("next")  # roadmap_next result
+        # "Ready now" = unlearned with all prereqs learned; next_up = one hop out.
+        ready = {p["key"] for p in pats
+                 if p["key"] not in learned
+                 and all(q in learned for q in p.get("prereqs", []) or [])}
+        hypothetically = learned | ready
+        nu = []
+        for p in pats:
+            k = p["key"]
+            if k in learned or k in ready:
+                continue
+            prereqs = set(p.get("prereqs", []) or [])
+            if prereqs and prereqs <= hypothetically:
+                nu.append(k)
+        next_up = sorted((by_key[k] for k in set(nu)),
+                         key=lambda p: (p.get("tier", 99),))[:3]
+        # Derive left/done in topo order for consistency with the queue mode.
+        for k in roadmap_sequence():
+            (topics_done if k in learned else topics_left).append(k)
+
+    start_key = now["key"] if now else None
+    next_up_set = {p["key"] for p in next_up}
+
+    def _tag(node):
+        node["is_start"] = node["key"] == start_key
+        node["is_next_up"] = node["key"] in next_up_set
+    for tb in data["tiers"]:
+        for n in tb["patterns"]:
+            _tag(n)
+    for cl in data["clusters"]:
+        for n in cl["patterns"]:
+            _tag(n)
+
+    return {
+        **data,
+        "now": now,
+        "next_up": next_up[:3],
+        "topics_left": topics_left,
+        "topics_done": topics_done,
+    }

@@ -57,6 +57,15 @@ _SW_ICON = (
 )
 
 
+def set_icon_url(url):
+    """Point every /leetcode embed's author icon at `url` (the bot's own avatar).
+    Called from main.on_ready once the avatar is known — the wikia default 404s on
+    prod, so we swap to a URL Discord will actually render."""
+    global _SW_ICON
+    if url:
+        _SW_ICON = url
+
+
 def _acceptance_bar(ac):
     """A tiny 10-cell bar for acceptance rate, e.g. 45% -> ▰▰▰▰▱▱▱▱▱▱ 45%."""
     if not isinstance(ac, (int, float)):
@@ -406,20 +415,53 @@ def _code_chunks(code, first_budget, rest_budget=3900):
     return chunks or [""]
 
 
-class _LearnView(discord.ui.View):
-    """A single '✅ Mark as learned' button under a /learn lesson. Ephemeral +
-    short-lived, so it holds the pattern key directly (no persistence needed)."""
+_FOLLOWUP_FIELD = "💬 Follow-up"
 
-    def __init__(self, pattern_key, pattern_name, get_db):
-        super().__init__(timeout=900)
+
+class _FollowupModal(discord.ui.Modal):
+    """Popup text box for a follow-up question about the pattern being learned."""
+
+    def __init__(self, view):
+        super().__init__(title="Ask a follow-up")
+        self._view = view
+        self.q = discord.ui.TextInput(
+            label="Your question about this pattern",
+            placeholder="e.g. When would I use this over sliding window?",
+            style=discord.TextStyle.paragraph,
+            max_length=400,
+            required=True,
+        )
+        self.add_item(self.q)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self._view.handle_followup(interaction, str(self.q.value))
+
+
+class _LearnView(discord.ui.View):
+    """Buttons under a /learn lesson: '✅ Mark as learned' (roadmap patterns only) +
+    '💬 Ask a follow-up'. The follow-up opens a modal, answers via Flash-lite
+    in-context, and edits THIS embed in place (keeping only the latest Q&A).
+    Ephemeral + short-lived, so it holds the lesson context directly."""
+
+    def __init__(self, pattern_key, pattern_name, get_db, *, knowledge=None):
+        super().__init__(timeout=1800)
         self.pattern_key = pattern_key
         self.pattern_name = pattern_name
         self.get_db = get_db
-        btn = discord.ui.Button(
-            label="✅ Mark as learned", style=discord.ButtonStyle.success
+        self.knowledge = knowledge
+        # Mark-as-learned only tracks real roadmap patterns (needs a key). A
+        # freeform / advanced lesson still gets the follow-up button.
+        if pattern_key:
+            learned = discord.ui.Button(
+                label="✅ Mark as learned", style=discord.ButtonStyle.success
+            )
+            learned.callback = self._on_learned
+            self.add_item(learned)
+        ask = discord.ui.Button(
+            label="💬 Ask a follow-up", style=discord.ButtonStyle.secondary
         )
-        btn.callback = self._on_learned
-        self.add_item(btn)
+        ask.callback = self._on_ask
+        self.add_item(ask)
 
     async def _on_learned(self, interaction: discord.Interaction):
         db = self.get_db()
@@ -430,11 +472,38 @@ class _LearnView(discord.ui.View):
         if uid:
             await asyncio.to_thread(db.mark_pattern_learned, uid, self.pattern_key)
         for c in self.children:
-            c.disabled = True
+            if getattr(c, "label", "").startswith("✅"):
+                c.disabled = True
         await interaction.response.edit_message(
-            content=f"🐺 **{self.pattern_name}** logged. One more patched into your kit — check `/leetcode roadmap`.",
+            content=f"🐺 **{self.pattern_name}** logged — patched into your kit. "
+            "Check `/leetcode roadmap`.",
             view=self,
         )
+
+    async def _on_ask(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(_FollowupModal(self))
+
+    async def handle_followup(self, interaction: discord.Interaction, question):
+        await interaction.response.defer()
+        answer = await asyncio.to_thread(
+            leetcode_ai.answer_followup, self.pattern_name, question, self.knowledge
+        )
+        if not answer:
+            answer = "系统警告 — couldn't answer that one right now. Try asking again."
+        # Edit THIS lesson embed: replace any prior follow-up field with the newest.
+        msg = interaction.message
+        embed = msg.embeds[0] if msg and msg.embeds else discord.Embed()
+        # Drop an existing follow-up field so only the latest Q&A shows.
+        for i, f in enumerate(list(embed.fields)):
+            if f.name == _FOLLOWUP_FIELD:
+                embed.remove_field(i)
+                break
+        embed.add_field(
+            name=_FOLLOWUP_FIELD,
+            value=f"**Q:** {question[:200]}\n**A:** {answer[:1000]}",
+            inline=False,
+        )
+        await interaction.edit_original_response(embed=embed, view=self)
 
 
 class ApproachView(discord.ui.View):
@@ -690,14 +759,71 @@ def _difficulty_from_message(msg):
 
 
 # --- slash commands -----------------------------------------------------------
-def register(bot, *, get_db, logger=None):
+async def _topic_autocomplete(interaction: discord.Interaction, current: str):
+    """Shared autocomplete for /learn and /pattern. Lists roadmap patterns split
+    into Data Structures ([DS]) then Algorithms ([Algo]) blocks (learning-sequence
+    order), then the learn-only ADVANCED pool ([Adv]). Discord's picker has no
+    group headers, so the tags make the split visible; typing 'ds'/'algo'/'adv'
+    filters to a group, and typing a name matches across all. 25-choice cap: on an
+    empty query, reserve slots so advanced topics are always visible."""
+    cur = (current or "").lower()
+    pats = leetcode_api.roadmap_patterns()
+
+    ds = [p for p in pats if leetcode_api._track_of(p) == "structures"]
+    algo = [p for p in pats if leetcode_api._track_of(p) != "structures"]
+    adv = leetcode_api.advanced_topics()
+
+    def _match(name, key, tagword):
+        if not cur:
+            return True
+        return cur in name.lower() or cur in key.lower() or cur == tagword
+
+    ds_m = [
+        discord.app_commands.Choice(name=f"[DS] {p['name']}", value=p["key"])
+        for p in ds if _match(p["name"], p["key"], "ds")
+    ]
+    algo_m = [
+        discord.app_commands.Choice(name=f"[Algo] {p['name']}", value=p["key"])
+        for p in algo if _match(p["name"], p["key"], "algo")
+    ]
+    adv_m = [
+        discord.app_commands.Choice(name=f"[Adv] {t['name']}", value=t["key"])
+        for t in adv if _match(t["name"], t["key"], "adv")
+    ]
+    if not cur:
+        # Reserve 9 slots for advanced so they're always reachable in the picker.
+        return (ds_m + algo_m)[:16] + adv_m[:9]
+    return (ds_m + algo_m + adv_m)[:25]
+
+
+def register(bot, *, get_db, logger=None, allowed_channel_id=None):
     """Register the /leetcode command group — all LeetCode + DS&A learning tools
-    live under one group (/leetcode <subcommand>) to keep the top-level list clean."""
+    live under one group (/leetcode <subcommand>) to keep the top-level list clean.
+
+    If `allowed_channel_id` is set, every /leetcode subcommand is restricted to
+    that channel (the grind channel); running one elsewhere is blocked with an
+    ephemeral hint. None = usable anywhere (back-compat)."""
     log = logger or logging.getLogger("cs_internship_bot")
 
     group = discord.app_commands.Group(
         name="leetcode", description="LeetCode practice, learning, and stats"
     )
+
+    # Channel gate: one interaction_check on the group covers ALL subcommands.
+    async def _in_grind_channel(interaction: discord.Interaction) -> bool:
+        if not allowed_channel_id or interaction.channel_id == allowed_channel_id:
+            return True
+        try:
+            await interaction.response.send_message(
+                f"🐺 LeetCode commands live in <#{allowed_channel_id}>. "
+                "Head over there to grind.",
+                ephemeral=True,
+            )
+        except Exception:
+            pass  # already responded / expired — the check still blocks the command
+        return False
+
+    group.interaction_check = _in_grind_channel
 
     @group.command(
         name="problem",
@@ -948,10 +1074,16 @@ def register(bot, *, get_db, logger=None):
         description="Silver Wolf explains a LeetCode technique + example problems",
     )
     @discord.app_commands.describe(
-        name="Technique, e.g. two pointers, sliding window, dynamic programming"
+        name="Technique — pick from the list (DS / Algo / Advanced)"
     )
+    @discord.app_commands.autocomplete(name=_topic_autocomplete)
     async def pattern_cmd(interaction: discord.Interaction, name: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
+        # Resolve a picked key to its display name (roadmap or advanced); fall back
+        # to the raw text if someone typed a freeform technique.
+        _kind, _item = await asyncio.to_thread(leetcode_api.learnable_topic, name)
+        if _item:
+            name = _item["name"]
         lesson = await asyncio.to_thread(leetcode_ai.explain_pattern, name)
         if not lesson:
             await interaction.followup.send(
@@ -1308,32 +1440,21 @@ def register(bot, *, get_db, logger=None):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ---------------- /learn (DS&A pattern lesson + practice) ----------------
-    async def _learn_autocomplete(interaction: discord.Interaction, current: str):
-        cur = (current or "").lower()
-        opts = []
-        for p in leetcode_api.roadmap_patterns():
-            if cur in p["name"].lower() or cur in p["key"]:
-                opts.append(
-                    discord.app_commands.Choice(name=p["name"], value=p["key"])
-                )
-            if len(opts) >= 25:
-                break
-        return opts
-
     @group.command(
         name="learn",
         description="Learn a DS&A pattern with Silver Wolf + practice problems",
     )
     @discord.app_commands.describe(
-        topic="Pattern to learn, e.g. two pointers, sliding window, dp, bfs"
+        topic="Pattern to learn — pick from the list (DS / Algo / Advanced)"
     )
-    @discord.app_commands.autocomplete(topic=_learn_autocomplete)
+    @discord.app_commands.autocomplete(topic=_topic_autocomplete)
     async def learn_cmd(interaction: discord.Interaction, topic: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        pat = await asyncio.to_thread(leetcode_api.roadmap_pattern, topic)
-        # Fall back to a freeform pattern lesson if it's not a roadmap key.
-        pat_name = pat["name"] if pat else topic
-        # Anchor the lesson to the student's own study-note facts when we have them.
+        # Resolve to a roadmap pattern OR a learn-only advanced topic.
+        kind, item = await asyncio.to_thread(leetcode_api.learnable_topic, topic)
+        pat = item if kind == "roadmap" else None
+        pat_name = item["name"] if item else topic
+        # Anchor the lesson to ground-truth facts when we have them (roadmap only).
         knowledge = leetcode_api.pattern_knowledge(pat["key"]) if pat else None
         lesson = await asyncio.to_thread(
             leetcode_ai.explain_pattern, pat_name, knowledge
@@ -1389,13 +1510,12 @@ def register(bot, *, get_db, logger=None):
                 inline=False,
             )
 
-        # Practice problems: prefer the roadmap's curated examples, top up from the
-        # LeetCode tag if the pattern has one.
+        # Practice problems: prefer the curated examples (roadmap OR advanced topic),
+        # top up from the LeetCode tag if one is known.
         practice_rows = []
-        if pat:
-            for slug in pat.get("examples", [])[:6]:
-                practice_rows.append({"title": slug.replace("-", " ").title(), "slug": slug})
-        tag = (pat or {}).get("tag") or pat_name.strip().lower().replace(" ", "-")
+        for slug in (item or {}).get("examples", [])[:6]:
+            practice_rows.append({"title": slug.replace("-", " ").title(), "slug": slug})
+        tag = (item or {}).get("tag") or pat_name.strip().lower().replace(" ", "-")
         if len(practice_rows) < 6:
             more, _ = await asyncio.to_thread(leetcode_api.problems_by_tag, tag, 6)
             seen = {r["slug"] for r in practice_rows}
@@ -1414,9 +1534,10 @@ def register(bot, *, get_db, logger=None):
         if lesson.get("outro"):
             embed.set_footer(text="🐺 " + lesson["outro"][:200])
 
-        view = None
-        if pat:  # only roadmap patterns are trackable
-            view = _LearnView(pat["key"], pat["name"], get_db)
+        # Mark-as-learned only for roadmap patterns (trackable); follow-ups for all.
+        view = _LearnView(
+            pat["key"] if pat else None, pat_name, get_db, knowledge=knowledge
+        )
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ---------------- /roadmap (curriculum + progress) ----------------
@@ -1432,57 +1553,155 @@ def register(bot, *, get_db, logger=None):
             db.get_or_create_user, user.id, user.name, user.display_name
         )
         learned = set(await asyncio.to_thread(db.get_learned_patterns, uid) if uid else [])
-        patterns = leetcode_api.roadmap_patterns()
-        cats = {c["key"]: c for c in leetcode_api.roadmap_categories()}
-
-        embed = discord.Embed(
-            title="🗺️ DS&A Roadmap",
-            description=(
-                f"**{len(learned)}/{len(patterns)}** patterns learned. "
-                "✅ = done, ⬜ = to go. Use `/leetcode learn <pattern>` to study one."
-            ),
-            color=discord.Color.blurple(),
-        )
-        embed.set_author(name="Silver Wolf · Skill Tree", icon_url=_SW_ICON)
-
-        # Group by category, in category declared order.
-        by_cat = {}
-        for p in patterns:
-            by_cat.setdefault(p["category"], []).append(p)
-        for ckey, c in cats.items():
-            group = by_cat.get(ckey)
-            if not group:
-                continue
-            lines = []
-            for p in group:
-                mark = "✅" if p["key"] in learned else "⬜"
-                lines.append(f"{mark} {p['name']}")
-            embed.add_field(
-                name=f"{c.get('emoji','')} {c['name']}",
-                value="\n".join(lines)[:1024],
-                inline=True,
+        # Personal study queue: the user's stored ordered sequence (seeded from the
+        # roadmap's topological order on first view). `now` = first sequence item
+        # they haven't learned (popleft over the done-set); done stays in
+        # leetcode_learned so left/done never drift.
+        sequence = None
+        if uid:
+            sequence = await asyncio.to_thread(
+                db.get_or_seed_roadmap_sequence, uid, leetcode_api.roadmap_sequence()
             )
+        # Split the roadmap into TWO node-graph images — Data Structures and
+        # Algorithms & Techniques — each rendered as a professional orthogonal
+        # graph (cached per-tile). `now`/`next_up` come from the personal queue.
+        prog = leetcode_api.roadmap_tracks(learned, sequence=sequence)
 
-        nxt = leetcode_api.roadmap_next(learned)
-        if nxt:
-            embed.add_field(
-                name="🐺 Study next",
-                value=f"**{nxt['name']}** — `/leetcode learn {nxt['key'].replace('_',' ')}`",
-                inline=False,
-            )
+        images = []
+        try:
+            from commands import roadmap_render
+            images = await asyncio.to_thread(roadmap_render.compose_tracks, prog)
+        except Exception:
+            log.exception("roadmap image render failed — falling back to text")
+            images = []
+
+        if images:
+            import io as _io
+
+            now = prog.get("now")
+            if now:
+                nxt_names = ", ".join(p["name"] for p in (prog.get("next_up") or [])[:3])
+                tail = f" After that: {nxt_names}." if nxt_names else ""
+                caption = (
+                    f"🐺 **{prog['learned_count']}/{prog['total']}** cleared. Start here "
+                    f"(gold ring): **{now['name']}** — "
+                    f"`/leetcode learn {now['key'].replace('_',' ')}`.{tail}\n"
+                    "Two tracks below — **Data Structures** and **Algorithms**. "
+                    "Follow the arrows: gold = do now, blue = next up, cyan = ready, "
+                    "violet = done. Solid arrow = required, dashed = recommended, "
+                    "dotted = study order."
+                )
+            else:
+                caption = (
+                    f"🐺 **{prog['total']}/{prog['total']}** — whole tree lit up. "
+                    "我独自满级. Nothing left to unlock; go grind them."
+                )
+            files = []
+            for name, png in images:
+                fname = "roadmap_" + name.split()[0].lower() + ".png"
+                files.append(discord.File(_io.BytesIO(png), filename=fname))
+            embed = discord.Embed(description=caption, color=discord.Color.purple())
+            embed.set_author(name="Silver Wolf · Skill Tree", icon_url=_SW_ICON)
+            # Both PNGs attach to the message; Discord previews image attachments
+            # inline below the caption embed (one embed can only host one image, so
+            # we let the attachments render themselves instead of set_image).
+            await interaction.followup.send(embed=embed, files=files, ephemeral=True)
         else:
-            embed.add_field(
-                name="🐺 100% cleared",
-                value="You've learned every pattern on the roadmap. 我独自满级. Now go grind them.",
-                inline=False,
+            # Text fallback needs the tier view — recompute the guidance form.
+            guidance = leetcode_api.roadmap_guidance(learned, sequence=sequence)
+            await interaction.followup.send(
+                embed=_build_roadmap_embed(guidance), ephemeral=True
             )
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
     bot.tree.add_command(group)
     log.info(
         "Registered /leetcode group (problem, random, company, pattern, learn, "
         "roadmap, hint, mock, explaincode, streak, leaderboard, weakspots, review, preview)"
     )
+
+
+# Category → emoji tag, so a pattern's domain stays visible even though the
+# roadmap is now laid out by TIER (progression) rather than by category.
+_CAT_EMOJI = {
+    "data_structures": "🧱",
+    "techniques": "⚙️",
+    "searching": "🔍",
+    "dp": "🧩",
+    "advanced": "🚀",
+}
+_STATE_ICON = {"learned": "✅", "unlocked": "🔓", "locked": "🔒"}
+# Silver Wolf flavor names for each rung of the climb (persona in prose only —
+# never leaks into any artifact). Purely cosmetic tier subtitles.
+_TIER_FLAVOR = {
+    1: "Boot Sequence",
+    2: "Core Exploits",
+    3: "Deeper Access",
+    4: "Root Privileges",
+    5: "Final Layer",
+}
+
+
+def _progress_bar(percent, width=10):
+    """A blocky progress bar: filled 🟪 vs empty ⬜ for `percent` (0-100)."""
+    filled = round(width * max(0, min(100, percent)) / 100)
+    return "🟪" * filled + "⬜" * (width - filled)
+
+
+def _build_roadmap_embed(prog):
+    """Render the DS&A roadmap as a TIER-BY-TIER progression path with lock
+    states (✅ learned · 🔓 unlocked/ready · 🔒 locked, showing what gates it).
+    `prog` = leetcode_api.roadmap_progress(...) output. Pure rendering."""
+    lc, total, pct = prog["learned_count"], prog["total"], prog["percent"]
+    reached = prog["current_tier"]
+    max_tier = prog["tiers"][-1]["tier"] if prog["tiers"] else 5
+
+    embed = discord.Embed(
+        title="🗺️ DS&A Roadmap — Skill Tree",
+        description=(
+            f"{_progress_bar(pct)}  **{pct}%**\n"
+            f"**{lc}/{total}** patterns cleared · you're on **Tier "
+            f"{max(reached,1)}/{max_tier}**.\n"
+            "✅ done · 🔓 ready now · 🔒 locked. Study one with "
+            "`/leetcode learn <pattern>`."
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_author(name="Silver Wolf · Skill Tree", icon_url=_SW_ICON)
+
+    for tblock in prog["tiers"]:
+        t = tblock["tier"]
+        done = sum(1 for p in tblock["patterns"] if p["state"] == "learned")
+        n = len(tblock["patterns"])
+        lines = []
+        for p in tblock["patterns"]:
+            icon = _STATE_ICON.get(p["state"], "⬜")
+            cat = _CAT_EMOJI.get(p.get("category"), "")
+            star = " ⭐" if p.get("is_next") else ""
+            line = f"{icon} {cat} {p['name']}{star}"
+            if p["state"] == "locked" and p.get("missing"):
+                line += f"\n   ┗ 🔒 needs: {', '.join(p['missing'])}"
+            lines.append(line)
+        flavor = _TIER_FLAVOR.get(t, "")
+        name = f"Tier {t} · {flavor}  ({done}/{n})" if flavor else f"Tier {t}  ({done}/{n})"
+        embed.add_field(name=name, value="\n".join(lines)[:1024], inline=False)
+
+    nxt = prog["next"]
+    if nxt:
+        embed.add_field(
+            name="🐺 Study next",
+            value=(
+                f"⭐ **{nxt['name']}** is unlocked and next on your path — "
+                f"`/leetcode learn {nxt['key'].replace('_',' ')}`"
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="🐺 100% cleared",
+            value="Every pattern on the tree — learned. 我独自满级. Now go grind them.",
+            inline=False,
+        )
+    return embed
 
 
 def _consecutive_day_streak(solves):

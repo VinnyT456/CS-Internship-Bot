@@ -34,6 +34,20 @@ def _chain(*models):
 SMART_CHAIN = _chain(GEMMA_MODEL, GEMMA_MODEL_2, FLASH_MODEL)
 FAST_CHAIN = _chain(FLASH_MODEL, FLASH_MODEL_2, GEMMA_MODEL)
 
+# EXTRACT — pure structured extraction (GitHub project scan). Pinned to
+# gemini-3.1-flash-lite: it has by far the highest free-tier RPD (500) of the
+# text models, ample TPM (250K), and native JSON output. Thinking is disabled
+# for these calls (see ask_json_text thinking=False) — the task is extraction,
+# not reasoning, so tokens/latency spent "thinking" are wasted. Flash-lite-latest
+# backs it up if the pinned id is unavailable.
+EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "gemini-3.1-flash-lite")
+EXTRACT_CHAIN = _chain(EXTRACT_MODEL, FLASH_MODEL, FLASH_MODEL_2)
+
+# LITE — pure Flash-lite, no Gemma fallback. For light interactive turns (e.g.
+# /leetcode learn follow-up Q&A) where speed matters and Gemma's slower free tier
+# isn't wanted. Both entries are flash-lite variants for redundancy.
+LITE_CHAIN = _chain(FLASH_MODEL, FLASH_MODEL_2)
+
 # Back-compat: the old single-model default (used where no tier is passed).
 MODEL = GEMMA_MODEL
 _MODEL_CHAIN = SMART_CHAIN
@@ -168,20 +182,34 @@ def ask_json_text(
     max_output_tokens: int = 4000,
     temperature: float = 0.2,
     chain=None,
+    thinking: bool = True,
 ) -> dict | None:
     """Text-only completion constrained to strict JSON. Faster than the vision
     path — use when the resume is already available as text. Returns the parsed
-    dict (tolerating truncation), or None."""
+    dict (tolerating truncation), or None.
+
+    thinking=False disables the model's thinking budget (thinking_budget=0) —
+    use for pure extraction where reasoning tokens are wasted latency. ONLY safe on
+    Flash/Flash-lite chains: Gemma models REJECT a thinking budget with a 400
+    ('Thinking budget is not supported for this model'), so never pass thinking=False
+    on SMART_CHAIN (Gemma-led). Use FAST_CHAIN/LITE_CHAIN if you need it."""
     try:
         from google.genai import types
 
+        cfg_kwargs = dict(
+            response_mime_type="application/json",
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+        if not thinking:
+            try:
+                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            except Exception:
+                pass  # older genai without ThinkingConfig — proceed without it
+
         resp = _generate(
             prompt,
-            types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-            ),
+            types.GenerateContentConfig(**cfg_kwargs),
             chain=chain,
         )
         text = (resp.text or "").strip()
@@ -276,9 +304,19 @@ def ask_json_with_image(
 
 
 def _loads_lenient(text: str):
-    """Parse JSON, tolerating a reply truncated at the token cap by closing any
-    unbalanced braces/brackets. Returns dict/list or None."""
+    """Parse JSON, tolerating (a) a ```json ... ``` markdown fence — Gemma wraps
+    its JSON in one even when asked not to — and (b) a reply truncated at the token
+    cap, by closing any unbalanced braces/brackets. Returns dict/list or None."""
     import json
+    import re
+
+    text = (text or "").strip()
+    # Strip a leading ```json / ``` fence and any trailing ``` — Gemma adds these
+    # despite response_mime_type=application/json. Keep only what's inside.
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text)
+        text = text.strip()
 
     try:
         return json.loads(text)

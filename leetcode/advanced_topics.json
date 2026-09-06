@@ -1,0 +1,86 @@
+{
+  "_note": "Learn-only ADVANCED topic pool — high-level / niche data structures and algorithms taught via /leetcode learn and /leetcode pattern, but intentionally NOT part of the core roadmap graph (which stays the curated 25-pattern learning path). These are 'reach for them when a hard problem demands it' tools. Each entry: key (stable id), name, category (grouping label), tag (LeetCode API topic slug for practice-problem top-up), examples (curated starter problem slugs). Lessons are AI-generated from `name` the same way roadmap patterns are — nothing here is scraped.",
+  "categories": [
+    {"key": "range", "name": "Range Structures"},
+    {"key": "graph_adv", "name": "Advanced Graph Algorithms"},
+    {"key": "strings", "name": "String Algorithms"},
+    {"key": "niche", "name": "Niche Structures & Techniques"}
+  ],
+  "topics": [
+    {
+      "key": "segment_tree", "name": "Segment Tree", "category": "range",
+      "tag": "segment-tree",
+      "examples": ["range-sum-query-mutable", "range-sum-query-2d-mutable", "count-of-smaller-numbers-after-self", "the-skyline-problem"]
+    },
+    {
+      "key": "fenwick", "name": "Fenwick Tree (Binary Indexed Tree)", "category": "range",
+      "tag": "binary-indexed-tree",
+      "examples": ["range-sum-query-mutable", "count-of-smaller-numbers-after-self", "reverse-pairs", "create-sorted-array-through-instructions"]
+    },
+    {
+      "key": "sparse_table", "name": "Sparse Table", "category": "range",
+      "tag": "segment-tree",
+      "examples": ["range-sum-query-immutable", "sliding-window-maximum", "online-majority-element-in-subarray"]
+    },
+    {
+      "key": "dijkstra", "name": "Dijkstra's Algorithm (Shortest Path)", "category": "graph_adv",
+      "tag": "shortest-path",
+      "examples": ["network-delay-time", "path-with-minimum-effort", "cheapest-flights-within-k-stops", "swim-in-rising-water"]
+    },
+    {
+      "key": "topological_sort", "name": "Topological Sort", "category": "graph_adv",
+      "tag": "topological-sort",
+      "examples": ["course-schedule", "course-schedule-ii", "alien-dictionary", "minimum-height-trees"]
+    },
+    {
+      "key": "mst", "name": "Minimum Spanning Tree (Kruskal / Prim)", "category": "graph_adv",
+      "tag": "minimum-spanning-tree",
+      "examples": ["min-cost-to-connect-all-points", "connecting-cities-with-minimum-cost", "optimize-water-distribution-in-a-village"]
+    },
+    {
+      "key": "bellman_ford", "name": "Bellman-Ford (Negative Weights)", "category": "graph_adv",
+      "tag": "shortest-path",
+      "examples": ["cheapest-flights-within-k-stops", "network-delay-time"]
+    },
+    {
+      "key": "kmp", "name": "KMP (Knuth-Morris-Pratt)", "category": "strings",
+      "tag": "string-matching",
+      "examples": ["find-the-index-of-the-first-occurrence-in-a-string", "shortest-palindrome", "repeated-substring-pattern", "longest-happy-prefix"]
+    },
+    {
+      "key": "rabin_karp", "name": "Rabin-Karp (Rolling Hash)", "category": "strings",
+      "tag": "rolling-hash",
+      "examples": ["find-the-index-of-the-first-occurrence-in-a-string", "repeated-dna-sequences", "longest-duplicate-substring", "distinct-echo-substrings"]
+    },
+    {
+      "key": "z_algorithm", "name": "Z-Algorithm", "category": "strings",
+      "tag": "string-matching",
+      "examples": ["find-the-index-of-the-first-occurrence-in-a-string", "shortest-palindrome", "sum-of-scores-of-built-strings"]
+    },
+    {
+      "key": "trie_advanced", "name": "Suffix / Advanced Trie", "category": "strings",
+      "tag": "trie",
+      "examples": ["longest-duplicate-substring", "stream-of-characters", "word-search-ii", "maximum-xor-of-two-numbers-in-an-array"]
+    },
+    {
+      "key": "balanced_bst", "name": "Balanced BST / TreeMap (Ordered Set)", "category": "niche",
+      "tag": "ordered-set",
+      "examples": ["my-calendar-i", "my-calendar-ii", "contains-duplicate-iii", "sliding-window-median"]
+    },
+    {
+      "key": "lru_lfu", "name": "LRU / LFU Cache (Design)", "category": "niche",
+      "tag": "design",
+      "examples": ["lru-cache", "lfu-cache", "design-hashmap", "all-oone-data-structure"]
+    },
+    {
+      "key": "monotonic_deque", "name": "Monotonic Deque (Sliding Window Extremes)", "category": "niche",
+      "tag": "monotonic-queue",
+      "examples": ["sliding-window-maximum", "constrained-subsequence-sum", "jump-game-vi", "shortest-subarray-with-sum-at-least-k"]
+    },
+    {
+      "key": "line_sweep", "name": "Line Sweep", "category": "niche",
+      "tag": "line-sweep",
+      "examples": ["meeting-rooms-ii", "the-skyline-problem", "my-calendar-i", "employee-free-time", "car-pooling"]
+    }
+  ]
+}

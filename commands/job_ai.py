@@ -3153,16 +3153,94 @@ _TAILOR_TEXT = {
 }
 
 
+_GH_BULLET_INSTR = """\
+Write 2 résumé bullets for a GitHub project, tailored to the target job. Each bullet: \
+an action verb + what was built + the impact, using ONLY the project's real summary \
+and tech below. This is a recruiter-facing résumé artifact — NO persona, NO slang, \
+NO first person, professional tone. Never invent a tech, employer, or number: where a \
+metric would go but none is known, write the literal token [ADD METRIC] so the user \
+fills it in. Return STRICT JSON: {"bullets": ["...", "..."]}."""
+
+
+def _github_project_bullets(suggestion, posting_ctx):
+    """Draft clean, professional résumé bullets for a suggested GitHub repo,
+    grounded only in its real summary/stack (anti-fabrication). Falls back to a
+    single summary-derived bullet if the AI is unavailable."""
+    import json
+
+    proj = {
+        "name": suggestion.get("name"),
+        "summary": suggestion.get("summary"),
+        "stack": suggestion.get("stack"),
+        "language": suggestion.get("language"),
+    }
+    prompt = (
+        f"{_GH_BULLET_INSTR}\n\n--- TARGET JOB ---\n{(posting_ctx or '')[:2500]}\n"
+        f"--- PROJECT ---\n{json.dumps(proj, ensure_ascii=False, default=str)[:2000]}\n--- END ---"
+    )
+    data = gemma_client.ask_json_text(
+        prompt, max_output_tokens=500, temperature=0.3, chain=gemma_client.FAST_CHAIN
+    )
+    bullets = []
+    if data and isinstance(data.get("bullets"), list):
+        bullets = [str(b).strip() for b in data["bullets"] if str(b).strip()][:3]
+    if not bullets:
+        summ = (suggestion.get("summary") or suggestion.get("name") or "").strip()
+        bullets = [f"Built {suggestion.get('name')}: {summ} [ADD METRIC]".strip()]
+    return bullets
+
+
+class _GithubSuggestView(discord.ui.View):
+    """Confirm view for an opt-in GitHub-project suggestion: 'Add it' splices the
+    repo into the résumé's projects; 'Dismiss' does nothing. The résumé is never
+    modified without an explicit 'Add it' press."""
+
+    def __init__(self, tailor_view, suggestion):
+        super().__init__(timeout=600)
+        self._tailor = tailor_view
+        self._suggestion = suggestion
+
+        add = discord.ui.Button(
+            label="Add it", emoji="➕", style=discord.ButtonStyle.success
+        )
+        add.callback = self._on_add
+        self.add_item(add)
+
+        skip = discord.ui.Button(
+            label="Dismiss", style=discord.ButtonStyle.secondary
+        )
+        skip.callback = self._on_skip
+        self.add_item(skip)
+
+    async def _on_add(self, interaction):
+        for c in self.children:
+            c.disabled = True
+        await self._tailor.add_github_project(interaction, self._suggestion)
+
+    async def _on_skip(self, interaction):
+        try:
+            await interaction.response.edit_message(
+                content="Left your résumé as-is. 👍", embed=None, view=None
+            )
+        except Exception:
+            pass
+
+
 class TailorView(discord.ui.View):
     """Post-tailor workspace over a tailor blob (per-bullet metric / no-metric
     variants). Buttons: 🌐 lang · Add metrics · Build without metrics · Download.
     A blank/skipped metric uses that bullet's clean no-metric version. The résumé
     bullets themselves stay English; only the chat labels/notes localize."""
 
-    def __init__(self, blob, company):
+    def __init__(self, blob, company, *, row=None, db=None, uid=None):
         super().__init__(timeout=1800)
         self.blob = blob
         self.company = company
+        # For the opt-in GitHub-project suggestion (needs the posting JD + user).
+        self._row = row
+        self._db = db
+        self._uid = uid
+        self._gh_checked = False  # so we only scan once per view
         self.lang = "en"
         self.safe_company = re.sub(r"[^A-Za-z0-9_-]+", "_", company).strip("_") or "role"
         self.metric_indices = _metric_indices(blob)
@@ -3520,6 +3598,17 @@ class TailorView(discord.ui.View):
         download.callback = self._on_download
         self.add_item(download)
 
+        # Opt-in: scan the user's GitHub for a project that fits this posting
+        # BETTER than what's on their résumé — surfaced only, never auto-added.
+        # Shown once (until they swap or it comes up empty).
+        if self._db is not None and self._uid and self._row and not self._gh_checked:
+            gh = discord.ui.Button(
+                label="Check my GitHub", emoji="🔍",
+                style=discord.ButtonStyle.secondary,
+            )
+            gh.callback = self._on_github_check
+            self.add_item(gh)
+
         if self.no_metrics and self.n_total:
             back = discord.ui.Button(
                 label=t["use_metrics"], emoji="↩️",
@@ -3603,6 +3692,131 @@ class TailorView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self._send(interaction)
 
+    async def _on_github_check(self, interaction):
+        """Opt-in GitHub scan: find a repo that fits this posting better than the
+        résumé's projects, and offer to add it. Suggestion only — the résumé is
+        never modified unless the user presses 'Add it'."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self._gh_checked = True
+        self._build_buttons()  # drop the button so it isn't re-clicked mid-scan
+
+        db, uid, row = self._db, self._uid, self._row
+        # Username: stored first, then the résumé's parsed contact.github.
+        username = await asyncio.to_thread(db.get_github_username, uid)
+        if not username:
+            contact = (self.blob.get("structured") or {}).get("contact") or {}
+            username = (contact.get("github") or "").strip() or None
+        if not username:
+            await interaction.followup.send(
+                "No GitHub username on file. Run `/resume github username:<handle>` "
+                "once and I'll remember it — then this button can use it.",
+                ephemeral=True,
+            )
+            return
+
+        from githubscan import repo_analyzer as ra
+        from githubscan import report as gh_report
+
+        existing = [
+            p.get("name", "")
+            for p in (self.blob.get("structured") or {}).get("projects") or []
+            if isinstance(p, dict)
+        ]
+        jd = _job_context(row)
+        suggestion = await gh_report.suggest_for_posting(
+            username, jd, existing, ra.get_token()
+        )
+        if not suggestion:
+            await interaction.followup.send(
+                f"Scanned **@{username}** — nothing on there beats the projects "
+                "already on your résumé for this role. You're set.",
+                ephemeral=True,
+            )
+            return
+
+        stack = ", ".join(suggestion.get("stack", [])[:5]) or (
+            suggestion.get("language") or "—"
+        )
+        embed = discord.Embed(
+            title=f"🔍 Found a better fit: {suggestion['name']}",
+            description=(
+                f"{suggestion['summary']}\n\n"
+                f"**Tech:** {stack}\n"
+                f"**Why it fits this role:** {suggestion.get('reason') or 'Relevant.'}\n"
+                f"**Relevance:** {suggestion.get('relevance', 0)}/100\n\n"
+                f"[View on GitHub]({suggestion['url']})"
+            ),
+            color=discord.Color.green(),
+        )
+        embed.set_footer(
+            text="Add it and I'll draft résumé bullets from the repo — you can edit "
+            "them. Nothing changes unless you press Add."
+        )
+        await interaction.followup.send(
+            embed=embed,
+            view=_GithubSuggestView(self, suggestion),
+            ephemeral=True,
+        )
+
+    async def add_github_project(self, interaction, suggestion):
+        """Splice a suggested GitHub repo into the résumé's projects section as a
+        new tailored project, then re-render. Bullets are AI-drafted from the
+        repo's real summary/stack (anti-fabrication: no invented tech/metrics —
+        [ADD METRIC] placeholders where numbers aren't known)."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        structured = self.blob.get("structured") or {}
+        projects = structured.setdefault("projects", [])
+        if not isinstance(projects, list):
+            projects = structured["projects"] = []
+
+        bullets = await asyncio.to_thread(
+            _github_project_bullets, suggestion, _job_context(self._row)
+        )
+        new_proj = {
+            "name": suggestion["name"],
+            "technologies": suggestion.get("stack", [])[:6],
+            "date": "",
+            "link": suggestion.get("url", ""),
+            "description": bullets,
+        }
+        # APPEND (not insert-at-0): existing project bullets in the blob are keyed
+        # by their current ["projects", i, j] index, so prepending would shift
+        # every one of them out from under its locator. The new project's index
+        # is therefore the (old) length of the list.
+        sec_i = len(projects)
+        projects.append(new_proj)
+
+        # Register its bullets in the blob so they render (metric variant = clean
+        # text; no-metric variant strips any [ADD METRIC] phrase).
+        for j, b in enumerate(bullets):
+            self.blob.setdefault("bullets", []).append(
+                {
+                    "loc": ["projects", sec_i, j],
+                    "m": b,
+                    "n": _strip_metric_phrase(b),
+                }
+            )
+        # Re-index metric slots so the metric UI includes the new bullets.
+        self.metric_indices = _metric_indices(self.blob)
+        for i in self.metric_indices:
+            self.values.setdefault(i, "")
+
+        # Persist the updated blob so the change survives a re-click (cache).
+        if self._db is not None and self._uid and self._row:
+            try:
+                await asyncio.to_thread(
+                    self._db.set_cached_tailor,
+                    self._uid,
+                    self._row.get("_table", "internships"),
+                    self._row.get("_row_id") or self._row.get("id"),
+                    _dump_blob(self.blob),
+                )
+            except Exception:
+                log.exception("github add: failed caching updated blob")
+
+        self._build_buttons()
+        await self._send(interaction)
+
     async def refresh(self, interaction):
         self._build_buttons()
         await self._send(interaction)
@@ -3653,6 +3867,9 @@ async def run_tailor(db, user, table, row_id, progress=None):
         return None, None, None, "That posting is no longer available."
     if not uid:
         return None, None, None, NEED_RESUME
+    # Stamp table/id so TailorView can re-cache after a GitHub-project add.
+    row.setdefault("_table", table)
+    row.setdefault("_row_id", row_id)
 
     # Cache: a repeat click (or a pre-tailored posting) returns instantly.
     cached = await asyncio.to_thread(db.get_cached_tailor, uid, table, row_id)
@@ -3664,7 +3881,7 @@ async def run_tailor(db, user, table, row_id, progress=None):
         await asyncio.to_thread(
             db.set_cached_tailor, uid, table, row_id, _dump_blob(blob)
         )
-    return await _finish_tailor(row, blob)
+    return await _finish_tailor(row, blob, db=db, uid=uid)
 
 
 # Bump when the Tailor prompt / blob schema changes so stale caches (old voice,
@@ -3820,13 +4037,129 @@ async def pretailor_job(db, uid, table, row_id):
     return True
 
 
-async def _finish_tailor(row, blob):
+async def _finish_tailor(row, blob, db=None, uid=None):
     """Build the TailorView + a VIEWABLE preview embed from a tailor blob — no
     PDF is compiled yet. The user reads the tailored bullets in the embed and
     only builds the PDF when they press Download. Returns (embed, None, view, None).
     """
     company = row.get("company_name") or "role"
-    view = TailorView(blob, company)
+    view = TailorView(blob, company, row=row, db=db, uid=uid)
     # Render the unfinished résumé to a viewable image (falls back to text preview).
     embed, file = await view.preview_render()
     return embed, file, view, None
+
+
+# --- /resume analyze → PDF (Rewriter's XYZ bullets → resume_service builder) --
+
+def _apply_rewrites_to_structured(structured, bullets):
+    """Return a deep copy of `structured` with the Rewriter's bullets swapped in.
+
+    MECHANICAL, no model: for each {before, after} we match `before` against the
+    résumé's existing description bullets (exact, then normalized-substring) and
+    replace it with `after`. Unmatched rewrites are appended to the first
+    experience/projects section that has room, so no rewrite is silently lost.
+    `[NUMBER?]` placeholders pass through verbatim — this is an editable DRAFT the
+    user fills in, not a recruiter-final send (the embed says so)."""
+    import copy
+
+    out = copy.deepcopy(structured) if isinstance(structured, dict) else {}
+
+    def _norm(s):
+        return " ".join(str(s or "").lower().split())
+
+    # Index every description bullet by its normalized text → (section, i, j).
+    bullet_sections = ("experience", "projects")
+    unmatched = []
+    for pair in bullets:
+        before = _norm(pair.get("before"))
+        after = str(pair.get("after", "")).strip()
+        if not after:
+            continue
+        placed = False
+        for sec in bullet_sections:
+            for item in out.get(sec) or []:
+                if not isinstance(item, dict):
+                    continue
+                desc = item.get("description")
+                if not isinstance(desc, list):
+                    continue
+                for j, existing in enumerate(desc):
+                    en = _norm(existing)
+                    if before and (en == before or (len(before) > 20 and before in en) or (len(en) > 20 and en in before)):
+                        desc[j] = after
+                        placed = True
+                        break
+                if placed:
+                    break
+            if placed:
+                break
+        if not placed:
+            unmatched.append(after)
+
+    # Append any unmatched rewrites to the first section with a description list,
+    # so an XYZ improvement the matcher couldn't anchor still lands on the résumé.
+    if unmatched:
+        for sec in bullet_sections:
+            for item in out.get(sec) or []:
+                if isinstance(item, dict) and isinstance(item.get("description"), list):
+                    item["description"].extend(unmatched)
+                    unmatched = []
+                    break
+            if not unmatched:
+                break
+    return out
+
+
+async def build_pdf_from_bullets(interaction, db, uid, rewrite_bullets, label=None):
+    """Compile a PDF from the user's structured résumé with the Rewriter's XYZ
+    bullets swapped in. Returns (embed, file, error).
+
+    Parsing is NOT done by AI here: structured_json was produced by the
+    deterministic parse at upload, and we only string-swap bullets. `[NUMBER?]`
+    stays in the output on purpose — this is the editable draft, labelled as such."""
+    structured = await asyncio.to_thread(resume_utils.get_structured, db, uid)
+    if not isinstance(structured, dict) or not structured:
+        return None, None, (
+            "I need your résumé indexed first — run `/resume upload` and give it a "
+            "minute, then try again."
+        )
+
+    merged = _apply_rewrites_to_structured(structured, rewrite_bullets or [])
+    try:
+        import yaml as _yaml
+        yaml_text = _yaml.safe_dump(
+            _apply_edu_extras(merged), sort_keys=False, allow_unicode=True
+        )
+    except Exception:
+        log.exception("build_pdf_from_bullets: yaml dump failed")
+        return None, None, "Couldn't assemble the résumé — try again in a bit."
+
+    pdf = await asyncio.to_thread(_build_pdf_sync, yaml_text)
+    if not pdf:
+        # Builder offline — hand back the YAML so the work isn't lost.
+        fname = "resume_rewritten.yaml"
+        embed = discord.Embed(
+            title="📄 Rewritten Résumé (YAML)",
+            description=(
+                "The PDF builder's offline right now, so here's the tailored YAML. "
+                "Fill in every `[NUMBER?]` with a real figure before you send it."
+            ),
+            color=_SW_PURPLE,
+        )
+        return embed, discord.File(io_bytes(yaml_text.encode("utf-8")), filename=fname), None
+
+    png = await asyncio.to_thread(_pdf_to_png, pdf)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(label or "rewritten"))[:40] or "rewritten"
+    embed = discord.Embed(
+        title="📄 Rewritten Résumé",
+        description=(
+            "XYZ-rewritten and compiled. Any **`[NUMBER?]`** is a real figure you "
+            "still owe — fill it in before you send this to a recruiter. I don't "
+            "invent your metrics."
+        ),
+        color=_SW_PURPLE,
+    )
+    if png:
+        embed.set_image(url="attachment://resume_preview.png")
+        return embed, discord.File(io_bytes(png), filename="resume_preview.png"), None
+    return embed, discord.File(io_bytes(pdf), filename=f"resume_{safe}.pdf"), None

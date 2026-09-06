@@ -118,103 +118,41 @@ async def post_update(bot, channel, features, get_db=None):
 # never see (dup-insert fix, daily-post gate, etc.) are intentionally omitted.
 PENDING_CHANGELOG = [
     {
-        "name": "LeetCode Grind Channel",
-        "what": "A daily LeetCode problem posts automatically — the full problem "
-        "card with examples, constraints, and which companies ask it. Try it first; "
-        "the solution's hidden behind a Reveal button. Reveal opens a Silver Wolf "
-        "breakdown that explains the whole thing like you're new to it — the "
-        "pattern, why it works, and edge cases — then gives you THREE full "
-        "solutions (brute force → better → optimal, with the best one clearly "
-        "marked) and buttons to flip between each one's complete code.",
-        "how": "Auto-posts daily in the LeetCode channel. Use /leetcode problem "
-        "<number|name|daily> for any problem on demand. React with the check mark "
-        "when you solve one, then /leetcode streak to see your solve streak.",
+        "name": "GitHub Project Scout",
+        "what": "Scans your public GitHub repos, ranks them against a job "
+        "description, and hands back résumé-ready project blurbs, an improvement "
+        "plan for your strongest repo, and a fresh project idea to build. It also "
+        "reads each repo like an ATS — pulling a clean summary, the tech stack, a "
+        "category (AI/ML, web, mobile, and so on), and the finish date — and files "
+        "them so your projects are ready the moment a role needs them.",
+        "how": "/resume github username:<your-handle> job:<paste the posting> "
+        "— it remembers your username after the first run.",
     },
     {
-        "name": "Full LeetCode Prep Toolkit",
-        "what": "A whole set of new commands to actually train, not just read: pull "
-        "a random problem, get the top problems a specific company asks, have Silver "
-        "Wolf teach you a technique from scratch, get spoiler-free hints, run a timed "
-        "mock assessment under real pressure, compete on a server leaderboard, paste "
-        "your own code to find out why it's slow or buggy, see which patterns you "
-        "keep failing, and get problems resurfaced for spaced-repetition review so "
-        "they actually stick.",
-        "how": "All under the /leetcode command now: /leetcode random, /leetcode "
-        "company <name>, /leetcode pattern <technique>, /leetcode hint <problem>, "
-        "/leetcode mock, /leetcode leaderboard, /leetcode explaincode <your code>, "
-        "/leetcode weakspots, and /leetcode review.",
+        "name": "Tailor now checks your GitHub",
+        "what": "When you tailor your résumé for a posting, a new 'Check my "
+        "GitHub' button finds a repo that fits the role better than the projects "
+        "already on your résumé — and offers to add it (with drafted bullets). "
+        "Nothing changes unless you press Add.",
+        "how": "Hit Tailor on any posting, then press 🔍 Check my GitHub.",
     },
     {
-        "name": "DS&A Learning Roadmap",
-        "what": "A full guided curriculum for the data structures and algorithm "
-        "patterns that show up in interviews — arrays, hashing, linked lists, two "
-        "pointers, sliding window, prefix sum, binary search, trees, BFS/DFS, "
-        "graphs, heaps, greedy, DP, and more. Silver Wolf teaches each one from "
-        "scratch with practice problems, you check them off as you learn, and the "
-        "roadmap tracks what's next. The daily problem now also shows which pattern "
-        "it trains and links you straight to the lesson.",
-        "how": "/leetcode roadmap to see your path and progress; /leetcode learn "
-        "<pattern> to study one; the daily post links the pattern it uses.",
+        "name": "Rebuilt DS&A Roadmap",
+        "what": "The roadmap is now a real visual skill-tree, drawn as two "
+        "connected graphs — Data Structures and Algorithms & Techniques. Every "
+        "pattern is a node linked by arrows you can actually follow, laid out in "
+        "difficulty bands (easy up top, harder at the bottom). It highlights the "
+        "one thing to start now, marks what unlocks next, and tracks a personal "
+        "study order that remembers where you are.",
+        "how": "/leetcode roadmap",
     },
     {
-        "name": "Smart Match Alerts",
-        "what": "The bot now watches every new posting, AI-scores it against your "
-        "resume, and DMs you the high-scoring roles automatically so a great match "
-        "never slips past you.",
-        "how": "Run /subscribe with the smart option on. Upload your resume first "
-        "with /resume upload if you haven't.",
-    },
-    {
-        "name": "More Internship Sources",
-        "what": "Added the jobright.ai minisite feed as a new source, so more fresh "
-        "SWE internship postings land in the channel. Duplicates are filtered so "
-        "you never see the same role twice.",
-        "how": "Nothing to do — new roles just show up in the internships channel.",
-    },
-    {
-        "name": "New Grad Roles Are Flowing Again",
-        "what": "Full-time new grad postings had quietly stalled — a posting glitch "
-        "was blocking new roles from coming through. That's patched, and hundreds of "
-        "backed-up new grad roles are now posting.",
-        "how": "Check the new grad channel — the roles are landing there now.",
-    },
-    {
-        "name": "Way Faster, Sharper Match Scoring",
-        "what": "Match scoring got a major rebuild — it's now roughly ten times "
-        "faster, and it shows your score, tier, and breakdown the moment they're "
-        "ready (in about two seconds) while it finishes writing up the full read. A "
-        "real progress bar tracks it, and a Jump-to-posting button gets you back to "
-        "the role. It's also more accurate and consistent: the same resume and job "
-        "give the same score every time, and a missing required skill caps the "
-        "score instead of over-rating you.",
-        "how": "Click Score on any posting, or use /match.",
-    },
-    {
-        "name": "Better Resume Tailoring",
-        "what": "The resume tailor is more surgical: it only touches what actually "
-        "needs changing, keeps your real numbers and tools intact, and no longer "
-        "weakens strong bullet points. It also folds the review notes into one "
-        "clean result.",
-        "how": "Click Tailor on any posting.",
-    },
-    {
-        "name": "Under-the-Hood Tune-Up",
-        "what": "Trimmed the bot's memory footprint, fixed the crashes that caused "
-        "occasional downtime, and made the AI far more resilient under load — it now "
-        "smooths out bursts and spreads work so scoring and tailoring don't choke "
-        "when a lot of people use them at once. It stays up and responsive instead "
-        "of falling over when things get busy.",
-        "how": "Nothing to do — the bot's just faster and more stable now.",
-    },
-    {
-        "name": "Cleaner Command Menu",
-        "what": "The command list was getting huge, so everything LeetCode is now "
-        "tucked under one /leetcode command instead of a dozen separate ones — start "
-        "typing /leetcode and pick what you want. Same tools, way less clutter. "
-        "Roles outside the US are also filtered out now, so the feed stays relevant.",
-        "how": "Type /leetcode and Discord shows all the options (problem, learn, "
-        "roadmap, random, mock, streak, and more). Old names like /streak or /random "
-        "are now /leetcode streak, /leetcode random, etc.",
+        "name": "Persona toggle",
+        "what": "You can now switch my Silver Wolf voice off for a neutral, "
+        "professional assistant tone — handy if you want plain-and-simple output. "
+        "It's on by default, and flipping it never changes the accuracy of "
+        "anything I generate, just the flavor.",
+        "how": "Admins: /test persona on | off | default.",
     },
 ]
 

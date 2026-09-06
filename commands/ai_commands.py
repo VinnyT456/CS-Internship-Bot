@@ -1,9 +1,9 @@
-"""AI slash commands backed by Gemma: /reviewresume, /match, /recommend,
-/interview, /helpme.
+"""AI slash commands backed by Gemma: /match, /recommend, /interview, /helpme.
 
-The resume commands read the user's rendered resume PNG (vision); the rest are
-text prompts. Every response is shown as an ephemeral embed. Long answers are
-split across multiple embed fields (1024-char cap each)."""
+Résumé diagnosis moved to the 4-agent `/resume analyze` (commands/resume_analyze
+.py) — text is extracted mechanically there, no vision hallucination. The rest
+are text prompts. Every response is an ephemeral embed. Long answers split across
+multiple embed fields (1024-char cap each)."""
 
 import asyncio
 import logging
@@ -182,45 +182,8 @@ def register(bot, *, get_db, logger=None):
             ephemeral=True,
         )
 
-    # ---- /reviewresume ---------------------------------------------------
-    @bot.tree.command(
-        name="reviewresume",
-        description="Get AI feedback and improvement suggestions for your resume",
-    )
-    async def reviewresume(interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        db = get_db()
-        user = interaction.user
-        uid = await asyncio.to_thread(
-            db.get_or_create_user, user.id, user.name, user.display_name
-        )
-        if not uid:
-            await _need_resume_msg(interaction)
-            return
-
-        # Precomputed at upload → instant.
-        data = await asyncio.to_thread(resume_utils.get_review, db, uid)
-        if data is None:
-            # Not primed yet: compute from stored text (fast) or the image.
-            text = await asyncio.to_thread(resume_utils.get_resume_text, db, uid)
-            img = None
-            if not text:
-                img = await asyncio.to_thread(resume_utils.image_bytes, db, uid)
-                if not img:
-                    await _need_resume_msg(interaction)
-                    return
-            data = await asyncio.to_thread(compute_review, text, img)
-            if data:
-                await asyncio.to_thread(resume_utils.store_review, db, uid, data)
-
-        if not data:
-            await interaction.followup.send(
-                "The AI couldn't review your resume right now — try again later.",
-                ephemeral=True,
-            )
-            return
-        view = lang_view.LangToggleView(lambda lang: _review_embed(data, lang), lang="en")
-        await interaction.followup.send(embed=_review_embed(data, "en"), view=view, ephemeral=True)
+    # /reviewresume retired — the 4-agent `/resume analyze` Diagnoser supersedes
+    # it (mechanical extraction, no hallucination). See commands/resume_analyze.py.
 
     # ---- /match ----------------------------------------------------------
     @bot.tree.command(

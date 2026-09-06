@@ -50,18 +50,10 @@ WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID"))
 INTERNSHIPS_CHANNEL_ID = int(os.getenv("INTERNSHIPS_CHANNEL_ID"))
 #TEST_INTERNSHIPS_CHANNEL_ID = int(os.getenv("TEST_INTERNSHIPS_CHANNEL_ID"))
 NEW_GRADS_CHANNEL_ID = int(os.getenv("NEW_GRADS_CHANNEL_ID"))
-# Optional: channel for the persistent command-guide message.
-_COMMANDS_CHANNEL_RAW = os.getenv("COMMANDS_CHANNEL_ID")
-COMMANDS_CHANNEL_ID = int(_COMMANDS_CHANNEL_RAW) if _COMMANDS_CHANNEL_RAW else None
-# LeetCode grind channel — daily problem + Silver Wolf explainer (optional).
-_LEETCODE_CHANNEL_RAW = os.getenv("LEETCODE_CHANNEL_ID")
-LEETCODE_CHANNEL_ID = int(_LEETCODE_CHANNEL_RAW) if _LEETCODE_CHANNEL_RAW else None
-# Announcement channel — Silver Wolf posts patch notes when new features ship.
-_ANNOUNCE_CHANNEL_RAW = os.getenv("ANNOUNCE_CHANNEL_ID", "1535045565598011472")
-ANNOUNCE_CHANNEL_ID = int(_ANNOUNCE_CHANNEL_RAW) if _ANNOUNCE_CHANNEL_RAW else None
-# Hour (UTC) to post the daily LeetCode problem. Default 0 = 00:00 UTC, which is
-# when LeetCode's daily resets (= 8pm EDT / 7pm EST). Posts the fresh problem right
-# at the reset. UTC is fixed; the ET equivalent shifts one hour with daylight saving.
+COMMANDS_CHANNEL_ID = int(os.getenv("COMMANDS_CHANNEL_ID"))
+LEETCODE_DAILY_CHANNEL_ID = int(os.getenv("LEETCODE_DAILY_CHANNEL_ID"))
+LEETCODE_GRIND_CHANNEL_ID = int(os.getenv("LEETCODE_GRIND_CHANNEL_ID"))
+ANNOUNCEMENTS_CHANNEL_ID = int(os.getenv("ANNOUNCEMENTS_CHANNEL_ID"))
 LEETCODE_POST_HOUR_UTC = int(os.getenv("LEETCODE_POST_HOUR_UTC", "0"))
 
 CATEGORY_COLORS = {
@@ -263,10 +255,10 @@ async def cache_channels():
     await get_cached_channel("new_grads", NEW_GRADS_CHANNEL_ID)
     if COMMANDS_CHANNEL_ID:
         await get_cached_channel("commands", COMMANDS_CHANNEL_ID)
-    if LEETCODE_CHANNEL_ID:
-        await get_cached_channel("leetcode", LEETCODE_CHANNEL_ID)
-    if ANNOUNCE_CHANNEL_ID:
-        await get_cached_channel("announce", ANNOUNCE_CHANNEL_ID)
+    if LEETCODE_DAILY_CHANNEL_ID:
+        await get_cached_channel("leetcode", LEETCODE_DAILY_CHANNEL_ID)
+    if ANNOUNCEMENTS_CHANNEL_ID:
+        await get_cached_channel("announce", ANNOUNCEMENTS_CHANNEL_ID)
 
 
 def normalize_company_info(company_info):
@@ -425,6 +417,7 @@ def job_has_more(internship):
     return (
         section_over("job_responsibilities")
         or section_over("job_requirements")
+        or section_over("job_preferred")
         or skills_over("job_tags")
     )
 
@@ -489,10 +482,16 @@ def build_internship_embed(internship, type="internship", expanded=False):
         icon_url=company_logo or BOT_AVATAR_URL,
     )
 
-    # Company as the big header, matching the original top half. The summary
-    # prose stays removed (per the earlier request); enriched detail lives in
-    # the sections below.
+    # Company as the big header, matching the original top half. The role
+    # summary now rides in the description under it (About the role), with the
+    # rest of the enriched detail in the sections below.
     embed.description = f"## {company}"
+    summary = (internship.get("job_summary") or "").strip()
+    if summary:
+        embed.description += (
+            "\n\n**📖 About the role**\n"
+            + truncate_embed_value(summary, 600)
+        )
 
     stats = [
         ("💰 Compensation", format_pay(internship)),
@@ -524,7 +523,13 @@ def build_internship_embed(internship, type="internship", expanded=False):
         internship.get("job_requirements"), expanded=expanded
     )
     if requirements:
-        embed.add_field(name="✅ Requirements", value=requirements, inline=False)
+        embed.add_field(name="✅ Required", value=requirements, inline=False)
+
+    preferred = format_section(
+        internship.get("job_preferred"), expanded=expanded
+    )
+    if preferred:
+        embed.add_field(name="➕ Preferred", value=preferred, inline=False)
 
     skills = format_skills(internship.get("job_tags"), expanded=expanded)
     if skills:
@@ -597,6 +602,17 @@ def _fetch_row_for_buttons(table, row_id):
     return resp.data[0] if resp.data else None
 
 
+def _resume_tools_usable(internship):
+    """Score/Tailor need real job detail to work. jobright.ai postings are now
+    behind a Cloudflare Turnstile wall the detail scraper can't pass, so those
+    rows arrive with no requirements — the resume tools would have nothing to
+    match against. Disable them for a jobright row that has no job_requirements."""
+    url = (internship.get("detail_url") or internship.get("job_url") or "").lower()
+    is_jobright = "jobright.ai" in url
+    has_requirements = bool(internship.get("job_requirements"))
+    return not (is_jobright and not has_requirements)
+
+
 def build_job_view(internship, table, expanded=False, saved_flash=False):
     # One row, ordered by UX priority: primary action (Apply) → high-value
     # resume tools (Score, Tailor) → Save → Show more (least urgent). Discord
@@ -608,6 +624,7 @@ def build_job_view(internship, table, expanded=False, saved_flash=False):
     view = discord.ui.View(timeout=None)
     row_id = internship["id"]
     url = internship.get("job_url")
+    tools_usable = _resume_tools_usable(internship)
 
     if url:
         view.add_item(
@@ -629,6 +646,7 @@ def build_job_view(internship, table, expanded=False, saved_flash=False):
             custom_id=f"jobsec:score:{table}:{row_id}",
             emoji="📊",
             row=0,
+            disabled=not tools_usable,
         )
     )
     view.add_item(
@@ -638,6 +656,7 @@ def build_job_view(internship, table, expanded=False, saved_flash=False):
             custom_id=f"jobsec:tailor:{table}:{row_id}",
             emoji="✍️",
             row=0,
+            disabled=not tools_usable,
         )
     )
 
@@ -742,6 +761,7 @@ def _rebuild_view_from_message(message, table, row_id, expanded, saved_flash):
                         custom_id=cid,
                         emoji=comp.emoji,
                         row=0,
+                        disabled=getattr(comp, "disabled", False),
                     )
                 )
     return view
@@ -835,7 +855,55 @@ async def _handle_score(interaction, table, row_id):
 
 
 async def _handle_tailor(interaction, table, row_id):
-    await _run_job_ai(interaction, "tailor", table, row_id)
+    """Tailor button → the 4-agent analyze flow, seeded with THIS posting as the
+    job description so the user lands on the keyword-match + XYZ-rewrite for it
+    (skipping the JD paste). Replaces the old single-shot YAML tailor."""
+    from commands import resume_analyze, resume_utils
+    from commands.ai_commands import _job_context
+
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.HTTPException:
+            logger.warning("Tailor interaction could not be deferred")
+            return
+
+    db = get_db()
+    user = interaction.user
+    uid = await asyncio.to_thread(
+        db.get_or_create_user, user.id, user.name, user.display_name
+    )
+    if not uid:
+        await interaction.followup.send(
+            "Couldn't set up your profile — try again later.", ephemeral=True
+        )
+        return
+
+    text, source = await asyncio.to_thread(resume_utils.resolve_resume_text, db, uid)
+    if not text:
+        await interaction.followup.send(
+            "You need a resume first — upload one with `/resume upload`.",
+            ephemeral=True,
+        )
+        return
+
+    row = await asyncio.to_thread(job_ai._fetch_row, db, table, row_id)
+    if not row:
+        await interaction.followup.send("That posting is no longer available.", ephemeral=True)
+        return
+
+    jd = _job_context(row)
+    label = row.get("company_name") or "role"
+    try:
+        await resume_analyze.start_analysis(
+            interaction, db=db, uid=uid, resume_text=text, text_source=source,
+            jd=jd, jd_label=label, seed_match=True,
+        )
+    except Exception:
+        logger.exception("Tailor→analyze failed")
+        await interaction.followup.send(
+            "The résumé analyzer hit a snag — try again in a bit.", ephemeral=True
+        )
 
 
 async def handle_section_button(interaction):
@@ -1229,10 +1297,10 @@ from datetime import time as _dtime
 
 @tasks.loop(time=_dtime(hour=LEETCODE_POST_HOUR_UTC, minute=0, tzinfo=timezone.utc))
 async def post_leetcode_daily():
-    if not LEETCODE_CHANNEL_ID:
+    if not LEETCODE_DAILY_CHANNEL_ID:
         return
     try:
-        channel = await get_cached_channel("leetcode", LEETCODE_CHANNEL_ID)
+        channel = await get_cached_channel("leetcode", LEETCODE_DAILY_CHANNEL_ID)
         msg = await leetcode_cmd.post_daily_if_missing(bot, channel, get_db)
         if msg:
             logger.info("📓 Posted LeetCode daily")
@@ -1270,9 +1338,9 @@ async def check_new_internships():
     # daily's date, so calling it here every 15 min is a no-op once today's daily is
     # up — but it self-heals if the scheduled 00:00 UTC fire was ever missed (a
     # deploy, a brief hiccup), so the daily always lands the same day.
-    if LEETCODE_CHANNEL_ID:
+    if LEETCODE_DAILY_CHANNEL_ID:
         try:
-            lc_channel = await get_cached_channel("leetcode", LEETCODE_CHANNEL_ID)
+            lc_channel = await get_cached_channel("leetcode", LEETCODE_DAILY_CHANNEL_ID)
             if await leetcode_cmd.post_daily_if_missing(bot, lc_channel, get_db):
                 logger.info("📓 Posted LeetCode daily (scrape-loop catch-up)")
         except Exception:
@@ -1529,12 +1597,55 @@ resume_cmd.register(bot, get_db=get_db, logger=logger)
 ai_cmd.register(bot, get_db=get_db, logger=logger)
 profile_cmd.register(bot, get_db=get_db, logger=logger)
 subscribe_cmd.register(bot, get_db=get_db, logger=logger)
-leetcode_cmd.register(bot, get_db=get_db, logger=logger)
+leetcode_cmd.register(
+    bot, get_db=get_db, logger=logger,
+    allowed_channel_id=LEETCODE_GRIND_CHANNEL_ID,
+)
+
+
+@bot.tree.error
+async def _on_app_command_error(interaction, error):
+    # A group interaction_check that returns False (e.g. /leetcode used outside the
+    # grind channel) raises CheckFailure — the user already got an ephemeral hint,
+    # so swallow it quietly instead of logging a traceback every time.
+    if isinstance(error, discord.app_commands.CheckFailure):
+        return
+    logger.exception("Slash command error", exc_info=error)
+
+
+async def _global_channel_gate(interaction: discord.Interaction) -> bool:
+    """Route slash commands to their home channel:
+      /leetcode … → the LeetCode group's own check (grind channel) handles it here
+      /test …     → admin-only dev commands, allowed anywhere (exempt)
+      everything else → must run in the cs-commands channel (COMMANDS_CHANNEL_ID)
+    Runs before group-level checks, so /leetcode still gets its grind-channel gate."""
+    cmd = interaction.command
+    root = getattr(cmd, "qualified_name", "") or getattr(cmd, "name", "") or ""
+    root = root.split(" ", 1)[0]  # group name for subcommands, else the command
+
+    if root in ("leetcode", "test"):
+        return True  # leetcode has its own gate; test is admin-exempt
+    if not COMMANDS_CHANNEL_ID or interaction.channel_id == COMMANDS_CHANNEL_ID:
+        return True
+    try:
+        await interaction.response.send_message(
+            f"🐺 Bot commands go in <#{COMMANDS_CHANNEL_ID}>. Run it there.",
+            ephemeral=True,
+        )
+    except Exception:
+        pass
+    return False
+
+
+# Override the tree's global interaction check (assignment, not a decorator —
+# CommandTree.interaction_check is a method you replace). Runs before every
+# slash command, ahead of any group-level check.
+bot.tree.interaction_check = _global_channel_gate
 announce_cmd.register(
-    bot, announce_channel_id=ANNOUNCE_CHANNEL_ID, get_db=get_db, logger=logger
+    bot, announce_channel_id=ANNOUNCEMENTS_CHANNEL_ID, get_db=get_db, logger=logger
 )
 from commands import test_persona as _test_persona_cmd
-_test_persona_cmd.register(bot, logger=logger)
+_test_persona_cmd.register(bot, logger=logger, get_db=get_db)
 
 
 @bot.event
@@ -1552,6 +1663,17 @@ async def on_interaction(interaction):
             await commands_board.handle_board_lang(bot, interaction)
         except Exception:
             logger.exception("Command board lang toggle failed")
+        return
+
+    # LeetCode grind-board language toggle.
+    if custom_id.startswith("leetboard:lang:"):
+        if interaction.id in _HANDLED_INTERACTIONS:
+            return
+        _HANDLED_INTERACTIONS.add(interaction.id)
+        try:
+            await commands_board.handle_leetcode_board_lang(bot, interaction)
+        except Exception:
+            logger.exception("LeetCode board lang toggle failed")
         return
 
     # LeetCode 'Reveal Solution' — its own persistent button. Generating the
@@ -1611,7 +1733,7 @@ async def on_interaction(interaction):
 
 @bot.event
 async def on_raw_reaction_add(payload):
-    if not LEETCODE_CHANNEL_ID or payload.channel_id != LEETCODE_CHANNEL_ID:
+    if not LEETCODE_DAILY_CHANNEL_ID or payload.channel_id != LEETCODE_DAILY_CHANNEL_ID:
         return
     try:
         await leetcode_cmd.handle_solve_react(bot, payload, get_db, added=True)
@@ -1621,7 +1743,7 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    if not LEETCODE_CHANNEL_ID or payload.channel_id != LEETCODE_CHANNEL_ID:
+    if not LEETCODE_DAILY_CHANNEL_ID or payload.channel_id != LEETCODE_DAILY_CHANNEL_ID:
         return
     try:
         await leetcode_cmd.handle_solve_react(bot, payload, get_db, added=False)
@@ -1635,11 +1757,30 @@ async def on_ready():
     global COMMANDS_SYNCED
 
     BOT_AVATAR_URL = bot.user.display_avatar.url
+    # Point the /leetcode embeds' author icon at the bot's own avatar (Silver Wolf
+    # profile pic) — the previous external image URL 404'd.
+    try:
+        leetcode_cmd.set_icon_url(BOT_AVATAR_URL)
+    except Exception:
+        logger.exception("Failed setting leetcode embed icon")
 
     try:
         await cache_channels()
     except Exception:
         logger.exception("Failed caching Discord channels")
+
+    # Hydrate the persona toggle from the DB override (persisted across restarts).
+    # None → defer to the SILVER_WOLF_PERSONA env default.
+    try:
+        from commands import persona as _persona
+        override = await asyncio.to_thread(get_db().get_persona_override)
+        _persona.set_persona_override(override)
+        logger.info(
+            "Silver Wolf persona: %s",
+            "ON" if _persona.persona_enabled() else "OFF",
+        )
+    except Exception:
+        logger.exception("Failed loading persona override")
 
     if not COMMANDS_SYNCED:
         try:
@@ -1660,6 +1801,13 @@ async def on_ready():
         except Exception:
             logger.exception("Failed posting command board")
 
+    if LEETCODE_GRIND_CHANNEL_ID:
+        try:
+            channel = await get_cached_channel("leetcode_grind", LEETCODE_GRIND_CHANNEL_ID)
+            await commands_board.post_or_update_leetcode_board(bot, channel)
+        except Exception:
+            logger.exception("Failed posting LeetCode board")
+
     if not check_new_internships.is_running():
         check_new_internships.start()
 
@@ -1669,16 +1817,16 @@ async def on_ready():
     if not check_closed_status.is_running():
         check_closed_status.start()
 
-    if LEETCODE_CHANNEL_ID and not post_leetcode_daily.is_running():
+    if LEETCODE_DAILY_CHANNEL_ID and not post_leetcode_daily.is_running():
         post_leetcode_daily.start()
 
     # Startup catch-up: if today's daily isn't in the channel yet (e.g. the bot
     # was down at the scheduled hour, or a deploy landed after it), post it now.
     # Idempotent — skips if already posted, so a mid-day restart won't double up.
-    if LEETCODE_CHANNEL_ID:
+    if LEETCODE_DAILY_CHANNEL_ID:
         async def _leetcode_catch_up():
             try:
-                channel = await get_cached_channel("leetcode", LEETCODE_CHANNEL_ID)
+                channel = await get_cached_channel("leetcode", LEETCODE_DAILY_CHANNEL_ID)
                 if await leetcode_cmd.post_daily_if_missing(bot, channel, get_db):
                     logger.info("📓 Posted LeetCode daily (startup catch-up)")
             except Exception:

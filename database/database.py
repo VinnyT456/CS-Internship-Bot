@@ -241,6 +241,146 @@ class SupabaseDatabase:
             self.logger.exception("Failed get_or_create_user for %s", discord_id)
             return None
 
+    def get_github_username(self, user_uuid):
+        """The GitHub username the user stored for repo analysis, or None.
+        Requires the users.github_username column (see admin.sql migration)."""
+        try:
+            data = (
+                self.supabase.table(self.users_table)
+                .select("github_username")
+                .eq("id", user_uuid)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if not data:
+                return None
+            return (data[0].get("github_username") or "").strip() or None
+        except Exception:
+            self.logger.exception("Failed reading github_username for %s", user_uuid)
+            return None
+
+    def set_github_username(self, user_uuid, github_username):
+        """Persist the user's GitHub username so repo analysis works even when
+        their résumé omits a GitHub link. Pass None/empty to clear it."""
+        try:
+            value = (github_username or "").strip() or None
+            (
+                self.supabase.table(self.users_table)
+                .update({"github_username": value})
+                .eq("id", user_uuid)
+                .execute()
+            )
+            return True
+        except Exception:
+            self.logger.exception("Failed setting github_username for %s", user_uuid)
+            return False
+
+    def upsert_github_projects(self, user_uuid, rows):
+        """Upsert the user's extracted GitHub projects into github_projects,
+        keyed by (user_id, repo_name). `rows` = list of dicts with keys
+        repo_name/summary/tech/category/finished_at/url. Refreshes scanned_at.
+        Returns the number of rows written."""
+        if not user_uuid or not rows:
+            return 0
+        payload = []
+        for r in rows:
+            name = (r.get("repo_name") or "").strip()
+            if not name:
+                continue
+            payload.append(
+                {
+                    "user_id": user_uuid,
+                    "repo_name": name,
+                    "summary": r.get("summary") or None,
+                    "tech": r.get("tech") or [],
+                    "category": r.get("category") or None,
+                    "finished_at": r.get("finished_at") or None,
+                    "url": r.get("url") or None,
+                }
+            )
+        if not payload:
+            return 0
+        try:
+            (
+                self.supabase.table("github_projects")
+                .upsert(payload, on_conflict="user_id,repo_name")
+                .execute()
+            )
+            return len(payload)
+        except Exception:
+            self.logger.exception(
+                "Failed upserting github_projects for %s", user_uuid
+            )
+            return 0
+
+    def get_github_projects(self, user_uuid):
+        """Return the user's stored GitHub projects (most-recent finish first),
+        or []. Reads from github_projects — no GitHub call."""
+        if not user_uuid:
+            return []
+        try:
+            return (
+                self.supabase.table("github_projects")
+                .select("*")
+                .eq("user_id", user_uuid)
+                .order("finished_at", desc=True)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            self.logger.exception("Failed reading github_projects for %s", user_uuid)
+            return []
+
+    def get_setting(self, key, default=None):
+        """Read a server-wide bot setting (bot_settings key/value). Returns the
+        stored string value, or `default` if unset / on error."""
+        try:
+            data = (
+                self.supabase.table("bot_settings")
+                .select("value")
+                .eq("key", key)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if data and data[0].get("value") is not None:
+                return data[0]["value"]
+            return default
+        except Exception:
+            self.logger.exception("Failed reading setting %s", key)
+            return default
+
+    def set_setting(self, key, value):
+        """Upsert a server-wide bot setting. Pass value=None to clear it (defer to
+        the env/default). Returns True on success."""
+        try:
+            self.supabase.table("bot_settings").upsert(
+                {"key": key, "value": value}, on_conflict="key"
+            ).execute()
+            return True
+        except Exception:
+            self.logger.exception("Failed writing setting %s", key)
+            return False
+
+    _PERSONA_KEY = "silver_wolf_persona"
+
+    def get_persona_override(self):
+        """The persisted persona override: True (on), False (off), or None (defer
+        to the SILVER_WOLF_PERSONA env default). Loaded at startup into memory."""
+        val = self.get_setting(self._PERSONA_KEY)
+        if val is None:
+            return None
+        return str(val).strip().lower() in ("1", "true", "on", "yes")
+
+    def set_persona_override(self, enabled):
+        """Persist the persona override. `enabled`=True/False forces it; None
+        clears the override (back to the env default)."""
+        if enabled is None:
+            return self.set_setting(self._PERSONA_KEY, None)
+        return self.set_setting(self._PERSONA_KEY, "on" if enabled else "off")
+
     def get_discord_name_for_user(self, user_uuid):
         """display_name (or username) for a users.id UUID — used to label the
         leaderboard. Returns None if unknown."""
@@ -511,6 +651,53 @@ class SupabaseDatabase:
             self.logger.exception("Failed fetching learned patterns for %s", user_uuid)
             return []
 
+    def get_or_seed_roadmap_sequence(self, user_uuid, default_sequence):
+        """Return the user's personalized roadmap study ORDER (list of pattern
+        keys). On first call the row doesn't exist, so seed it with
+        `default_sequence` (the roadmap's topological order) and return that.
+        'Done' is tracked separately in leetcode_learned — this is only the ORDER.
+        Falls back to `default_sequence` (unpersisted) on any DB error."""
+        if not user_uuid:
+            return list(default_sequence or [])
+        try:
+            rows = (
+                self.supabase.table("leetcode_roadmap_queue")
+                .select("sequence")
+                .eq("user_id", user_uuid)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if rows and rows[0].get("sequence"):
+                return list(rows[0]["sequence"])
+            # Seed on first view.
+            seq = list(default_sequence or [])
+            self.supabase.table("leetcode_roadmap_queue").upsert(
+                {"user_id": user_uuid, "sequence": seq}, on_conflict="user_id"
+            ).execute()
+            return seq
+        except Exception:
+            self.logger.exception(
+                "Failed get/seed roadmap sequence for %s", user_uuid
+            )
+            return list(default_sequence or [])
+
+    def set_roadmap_sequence(self, user_uuid, sequence):
+        """Overwrite the user's roadmap study order (e.g. if you ever let them
+        reorder). Returns True on success."""
+        if not user_uuid:
+            return False
+        try:
+            self.supabase.table("leetcode_roadmap_queue").upsert(
+                {"user_id": user_uuid, "sequence": list(sequence or [])},
+                on_conflict="user_id",
+            ).execute()
+            return True
+        except Exception:
+            self.logger.exception("Failed setting roadmap sequence for %s", user_uuid)
+            return False
+
     def was_daily_posted(self, problem_date):
         """True if the daily LeetCode post for this calendar date is already
         recorded — the gate that stops double-posting across the scheduled loop
@@ -697,8 +884,10 @@ class SupabaseDatabase:
         """Collapse the variants aggregators put on the same role so they
         dedup to one key: strip trailing parentheticals/brackets ('(Fall
         2026)', '[Remote]'), unify dash characters, drop a trailing 'Team NN',
-        and squeeze whitespace. Only trailing (…) is removed — a leading or
-        mid-title paren is kept, so 'Intern (AI) Backend' stays distinct."""
+        a leading/trailing standalone year ('2026'), and common intern/eng
+        wording variants, then squeeze whitespace. Only trailing (…) is removed
+        — a leading or mid-title paren is kept, so 'Intern (AI) Backend' stays
+        distinct."""
         text = (title or "").lower()
         # Repeatedly peel a trailing (...) or [...] group.
         while True:
@@ -708,34 +897,99 @@ class SupabaseDatabase:
             text = stripped
         text = text.replace("–", "-").replace("—", "-")  # en/em dash -> hyphen
         text = re.sub(r"\s*-?\s*team\s+\d+\s*$", "", text)  # trailing 'Team 01'
+        # A standalone year anywhere ('2026 Software Engineer', 'SWE - 2026').
+        text = re.sub(r"\b20\d{2}\b", " ", text)
+        # Wording variants that mean the same role across aggregators.
+        text = re.sub(r"\bsoftware engineering\b", "software engineer", text)
+        text = re.sub(r"\bswe\b", "software engineer", text)
+        text = re.sub(r"\bco-?op\b", "intern", text)
+        text = re.sub(r"\bentry[- ]level\b", "", text)
+        text = re.sub(r"[/\-,]", " ", text)  # unify separators before squeeze
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
-    @staticmethod
-    def _normalize_location(location):
-        """First segment, lowercased, with trailing office/work-mode noise
-        dropped so 'Santa Clara Office' == 'Santa Clara' and
-        'New York (Hybrid)' == 'New York'."""
-        first = (location or "").split(",")[0]
+    # Company legal-suffix / descriptor noise that varies by aggregator.
+    _COMPANY_NOISE_RE = re.compile(
+        r"\b(inc|llc|corp|corporation|ltd|limited|co|company|technologies|"
+        r"technology|solutions|labs|group|holdings|systems)\b"
+    )
+    # Location strings that carry NO city signal — treat as unknown (wildcard).
+    _LOC_STOPWORDS = frozenset(
+        {"us", "usa", "united states", "united states of america", "canada",
+         "remote", "n/a", "various", "multiple locations", ""}
+    )
+    _CITY_ALIAS = {
+        "new york city": "new york", "nyc": "new york", "sf": "san francisco",
+        "san fran": "san francisco", "d.c.": "washington", "dc": "washington",
+        "washington d.c.": "washington",
+    }
+    _US_STATE_NAMES = frozenset({
+        "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+        "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+        "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+        "maine", "maryland", "massachusetts", "michigan", "minnesota",
+        "mississippi", "missouri", "montana", "nebraska", "nevada",
+        "new hampshire", "new jersey", "new mexico", "new york",
+        "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+        "pennsylvania", "rhode island", "south carolina", "south dakota",
+        "tennessee", "texas", "utah", "vermont", "virginia", "washington",
+        "west virginia", "wisconsin", "wyoming",
+    })
+
+    @classmethod
+    def _normalize_company(cls, company):
+        """Lowercased company with legal suffixes and generic descriptors
+        stripped so 'Google', 'Google LLC', 'Google Inc.' collapse to one key."""
+        text = (company or "").strip().lower()
+        text = re.sub(r"[.,]", " ", text)
+        text = cls._COMPANY_NOISE_RE.sub(" ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _normalize_location(cls, location):
+        """Canonical city token, or '' when the string carries no city signal.
+
+        Handles the aggregators' divergent formats: 'City, ST, United States',
+        a bare 'United States'/'Canada', a 'State - City' form (Salesforce), a
+        raw street address, and 'City (Hybrid)'. Returns '' for country-only /
+        remote / street-only strings so a role with an unknown location folds
+        into the SAME role that has a real city (see _dedup — blank is a
+        wildcard), instead of splitting one posting into two."""
+        s = (location or "").strip()
+        # 'State - City' with no comma (e.g. 'California - San Francisco').
+        if " - " in s and "," not in s:
+            parts = [p.strip() for p in s.split(" - ")]
+            picked = next(
+                (p for p in parts if p.lower() not in cls._US_STATE_NAMES), None
+            )
+            if picked:
+                s = picked
+        first = s.split(",")[0].strip()
         first = re.sub(r"\s*[\(\[][^\(\)\[\]]*[\)\]]\s*$", "", first)
         first = re.sub(
             r"\s+(office|hq|headquarters|remote|hybrid|onsite|on-site)\s*$",
-            "",
-            first,
-            flags=re.IGNORECASE,
+            "", first, flags=re.IGNORECASE,
         )
-        return re.sub(r"\s+", " ", first).strip().lower()
+        first = first.strip().lower()
+        # A street address ('600 march road') carries no comparable city token.
+        if re.match(r"^\d", first):
+            return ""
+        first = re.sub(r"\s+", " ", first).strip()
+        if first in cls._LOC_STOPWORDS:
+            return ""
+        return cls._CITY_ALIAS.get(first, first)
 
     @classmethod
     def _dedup_key(cls, row):
-        """Identify a posting by company + normalized title + normalized
-        location, NOT by URL. The same job appears under different aggregator
-        URLs (simplify.jobs, jobright.ai, the raw ATS link), so URL-based
-        dedup posts the same role multiple times. Title and location are
-        normalized (see helpers) so seasonal/office/work-mode suffixes don't
-        split one role into several keys, while genuinely different postings
-        (Optiver Austin vs Chicago) stay distinct."""
-        company = (row.get("company_name") or "").strip().lower()
+        """Identify a posting by normalized company + title + location, NOT by
+        URL. The same job appears under different aggregator URLs (simplify,
+        jobright, the raw ATS link), so URL dedup posts a role multiple times.
+        All three parts are normalized so legal-suffix / seasonal / office /
+        work-mode / wording variants don't split one role into several keys,
+        while genuinely different postings (Optiver Austin vs Chicago) stay
+        distinct. Location can be '' (unknown) — _insert treats that as a
+        wildcard against a same company+title row that DOES have a city."""
+        company = cls._normalize_company(row.get("company_name"))
         title = cls._normalize_title(row.get("job_title"))
         location = cls._normalize_location(row.get("job_location"))
         return (company, title, location)
@@ -763,16 +1017,30 @@ class SupabaseDatabase:
 
             existing = self.get_existing_internships(table)
             existing_keys = {self._dedup_key(item) for item in existing}
+            # (company, title) pairs that already have a KNOWN city — so a new
+            # row with an unknown/blank location (a wildcard) is recognized as
+            # the same role and skipped, instead of posting a second time.
+            existing_located = {
+                (k[0], k[1]) for k in existing_keys if k[2]
+            }
 
             # Dedup within this scrape too (a single feed can list the same
-            # role several times under different URLs).
+            # role several times under different URLs / location formats).
             new_internships = []
             seen = set(existing_keys)
+            seen_located = set(existing_located)
             for internship in internships:
                 key = self._dedup_key(internship)
                 if key in seen:
                     continue
+                company_title = (key[0], key[1])
+                # Blank-location wildcard: this role with no city == the same
+                # role already seen WITH a city. Don't post the vaguer copy.
+                if not key[2] and company_title in seen_located:
+                    continue
                 seen.add(key)
+                if key[2]:
+                    seen_located.add(company_title)
                 new_internships.append(internship)
 
             self.logger.info(
@@ -1070,6 +1338,7 @@ class SupabaseDatabase:
         "job_summary",
         "job_responsibilities",
         "job_requirements",
+        "job_preferred",
         "job_benefits",
         "job_tags",
         "comp_min",

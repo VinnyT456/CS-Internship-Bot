@@ -67,6 +67,42 @@ def _render_pdf_to_png(pdf_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+# Below this many extracted chars we treat the PDF as image-only (a scan or an
+# export-as-image) — get_text() found no real text layer.
+_MIN_TEXT_CHARS = 60
+
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> tuple[str, str]:
+    """Extract the resume's text MECHANICALLY from the PDF via PyMuPDF —
+    deterministic, no AI, no hallucination. This is the source of truth every
+    downstream AI command reads from.
+
+    Returns (text, source):
+      - ("<real text>", "pdf")   normal text-based PDF (the common case)
+      - ("", "image_only")       no text layer (scan / image export) — caller
+                                  should vision-OCR as a fallback and warn the user
+      - ("", "error")            couldn't open the PDF at all
+    """
+    import fitz  # PyMuPDF (lazy — heavy import)
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        logger.exception("extract_text_from_pdf: fitz open failed")
+        return "", "error"
+    try:
+        parts = []
+        for page in doc:
+            # "text" mode = reading-order plain text; no layout coords, no AI.
+            parts.append(page.get_text("text"))
+    finally:
+        doc.close()
+    text = "\n".join(parts).strip()
+    if len(text) < _MIN_TEXT_CHARS:
+        return "", "image_only"
+    return text, "pdf"
+
+
 def process_and_store(db, user_uuid, pdf_bytes: bytes, original_filename: str) -> dict:
     """Validate + render + upload, then upsert the resumes row. Returns the row.
     Raises ResumeError for anything the user can fix."""
@@ -104,13 +140,20 @@ def process_and_store(db, user_uuid, pdf_bytes: bytes, original_filename: str) -
         logger.exception("Resume upload to storage failed")
         raise ResumeError("Couldn't store your resume — try again in a moment.") from exc
 
+    # Extract text MECHANICALLY at upload (no AI) — the source of truth for every
+    # downstream analysis. Empty => image-only PDF; the analyze flow will vision-OCR
+    # lazily and warn the user to upload a text-based PDF.
+    text, source = extract_text_from_pdf(pdf_bytes)
+
     row = {
         "user_id": user_uuid,
         "pdf_path": pdf_path,
         "image_path": image_path,
         "original_filename": original_filename[:255],
+        "extracted_text": text or None,
     }
     db.supabase.table("resumes").upsert(row, on_conflict="user_id").execute()
+    row["_text_source"] = source  # transient hint for the caller (not persisted)
     return row
 
 
@@ -176,15 +219,37 @@ _EXTRACT_PROMPT = (
 
 
 def extract_text(image_png: bytes) -> str | None:
-    """Vision-transcribe the rendered resume PNG to plain text. Run ONCE at
-    upload; downstream AI commands reuse the text and skip vision entirely."""
+    """FALLBACK ONLY: vision-transcribe the rendered PNG to text. Used just for
+    image-only PDFs (no text layer) where mechanical extraction returns nothing.
+    Vision can misread, so text-based PDFs must go through extract_text_from_pdf
+    instead — that's the no-hallucination path."""
     from commands import gemma_client
 
-    # Mechanical transcription — use the FAST tier (Flash-lite).
     text = gemma_client.ask_with_image(
         image_png, _EXTRACT_PROMPT, chain=gemma_client.FAST_CHAIN
     )
     return (text or "").strip() or None
+
+
+def resolve_resume_text(db, user_uuid):
+    """The authoritative resume text for a user, plus how it was obtained.
+    Returns (text, source):
+      - ("<text>", "pdf")        mechanical extraction (trusted, no AI)
+      - ("<text>", "ocr")        image-only PDF, vision-OCR fallback (may misread)
+      - (None, "none")           no resume / couldn't read it
+    Prefers the stored mechanical text; only OCRs when there's no text layer."""
+    stored = get_resume_text(db, user_uuid)
+    if stored:
+        return stored, "pdf"
+    # No mechanical text — likely an image-only PDF. OCR the PNG as a fallback.
+    img = image_bytes(db, user_uuid)
+    if not img:
+        return None, "none"
+    ocr = extract_text(img)
+    if ocr:
+        store_text(db, user_uuid, ocr)  # cache it so we OCR once
+        return ocr, "ocr"
+    return None, "none"
 
 
 def get_resume_text(db, user_uuid) -> str | None:
@@ -203,15 +268,6 @@ def store_text(db, user_uuid, text: str) -> None:
         ).execute()
     except Exception:
         logger.exception("Failed storing resume text for %s", user_uuid)
-
-
-def get_review(db, user_uuid) -> dict | None:
-    """The precomputed /reviewresume result, or None."""
-    row = get_resume(db, user_uuid)
-    if not row:
-        return None
-    r = row.get("review_json")
-    return r if isinstance(r, dict) else None
 
 
 # --- Structured resume (builder schema) for fast bullet-only tailoring -------
@@ -309,13 +365,3 @@ def store_structured(db, user_uuid, structured: dict) -> None:
         ).execute()
     except Exception:
         logger.exception("Failed storing structured resume for %s", user_uuid)
-
-
-def store_review(db, user_uuid, review: dict) -> None:
-    """Persist a precomputed resume review. Best-effort."""
-    try:
-        db.supabase.table("resumes").update({"review_json": review}).eq(
-            "user_id", user_uuid
-        ).execute()
-    except Exception:
-        logger.exception("Failed storing resume review for %s", user_uuid)

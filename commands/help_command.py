@@ -23,7 +23,7 @@ HELP_GROUPS = (
         "🤖 AI Tools",
         [
             ("/match", "Score your resume against a posting  *(soon)*"),
-            ("/reviewresume", "AI feedback on your resume  *(soon)*"),
+            ("/resume analyze", "4-agent résumé pass: diagnose, match, rewrite, interview  *(soon)*"),
             ("/recommend", "Personalized recommendations  *(soon)*"),
             ("/interview", "Practice interview questions  *(soon)*"),
             ("/helpme", "Ask the AI career assistant  *(soon)*"),

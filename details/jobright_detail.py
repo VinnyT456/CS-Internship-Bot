@@ -122,23 +122,28 @@ def _pick_string(*values: object) -> str | None:
     return None
 
 
-def _qualification_sentences(result: dict) -> list[str]:
-    """Requirement sentences from the 'qualifications' block (must-have +
-    preferred), falling back to the flat *Summaries lists when that block is
-    absent."""
+def _required_sentences(result: dict) -> list[str]:
+    """Must-have requirement sentences from the 'qualifications' block, falling
+    back to the flat *Summaries lists when that block is absent."""
     qual = result.get("qualifications") or {}
-    sentences = []
     if isinstance(qual, dict):
-        sentences.extend(_unique_strings(qual.get("mustHave")))
-        sentences.extend(_unique_strings(qual.get("preferredHave")))
-    if sentences:
-        return _unique_strings(sentences)
+        must = _unique_strings(qual.get("mustHave"))
+        if must:
+            return must
 
     # Fallback for pages that lack the structured block.
     fallback = _unique_strings(result.get("qualificationSummaries"))
     fallback.extend(_unique_strings(result.get("educationSummaries")))
     fallback.extend(_unique_strings(result.get("skillSummaries")))
     return _unique_strings(fallback)
+
+
+def _preferred_sentences(result: dict) -> list[str]:
+    """Nice-to-have (preferred) qualifications, kept separate from required."""
+    qual = result.get("qualifications") or {}
+    if isinstance(qual, dict):
+        return _unique_strings(qual.get("preferredHave"))
+    return []
 
 
 def _core_skill_tags(result: dict) -> list[str]:
@@ -169,7 +174,8 @@ def _from_helper_result(result: dict) -> dict:
     return {
         "job_summary": _pick_string(result.get("jobSummary"), result.get("description")),
         "job_responsibilities": _unique_strings(result.get("coreResponsibilities")),
-        "job_requirements": _qualification_sentences(result),
+        "job_requirements": _required_sentences(result),
+        "job_preferred": _preferred_sentences(result),
         "job_benefits": _unique_strings(result.get("benefitsSummaries")),
         "comp_min": min_k,
         "comp_max": max_k or min_k,
@@ -298,6 +304,14 @@ def _fetch_html(job_url: str, *, attempts: int = 3) -> str | None:
                 location = response.headers.get("location")
                 if not location:
                     break
+                # jobright now gates every posting behind a Cloudflare Turnstile
+                # bot-check at /_jr/security/challenge. That page is same-host and
+                # returns 200 but carries NO job data, so following it would only
+                # overwrite good scrape data with blanks. Bail out instead — the
+                # posting stays with whatever the README scraper already had.
+                if "/_jr/security/challenge" in location:
+                    logger.info("jobright Turnstile wall for %s; skipping enrich", job_url)
+                    return None
                 if not _is_jobright_host(location):
                     logger.info(
                         "Skipping off-site redirect for %s (listing host blocks bots)",
@@ -400,7 +414,7 @@ def _parse_html(html: str) -> dict:
 # Every field the detail dict owns. fetch_job_detail guarantees all of these
 # are present (empty when the page has no value) so enrich_job always
 # overwrites stale data instead of leaving a dropped-empty key behind.
-_LIST_FIELDS = ("job_responsibilities", "job_requirements", "job_benefits", "job_tags")
+_LIST_FIELDS = ("job_responsibilities", "job_requirements", "job_preferred", "job_benefits", "job_tags")
 _SCALAR_FIELDS = (
     "job_summary",
     "comp_min",

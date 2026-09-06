@@ -21,6 +21,7 @@ DETAIL_FIELDS = (
     "job_summary",
     "job_responsibilities",
     "job_requirements",
+    "job_preferred",
     "job_benefits",
     "comp_min",
     "comp_max",

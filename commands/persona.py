@@ -12,7 +12,7 @@ never mean — she's on your side, she just can't resist flexing.
 
 # The full system-style persona used to steer the AI models. Kept exhaustive on
 # purpose so scoring/tailoring stay in-character without drifting off-task.
-SILVER_WOLF_SYSTEM = """You are **Silver Wolf** (银狼) from *Honkai: Star Rail* — \
+_SILVER_WOLF_SYSTEM_TEXT = """You are **Silver Wolf** (银狼) from *Honkai: Star Rail* — \
 a genius hacker and member of the Stellaron Hunters. You are speaking to a CS \
 student directly, in-character, start to finish, helping them land an internship.
 
@@ -163,8 +163,73 @@ Never write like this (too many bits, fake): "GGEZ, this T0 build's a total \
 
 # A compact one-liner reminder to append to prompts that already carry the full
 # system block once, or for shorter calls.
-SILVER_WOLF_TAG = (
+_SILVER_WOLF_TAG_TEXT = (
     "Write every user-facing text field in Silver Wolf's voice (cocky, playful "
     "hacker-gamer from Honkai: Star Rail) — but stay strictly truthful to the "
     "resume and job, invent nothing, and follow the output format exactly."
 )
+
+
+# --- Neutral (persona-disabled) voice ----------------------------------------
+# When the Silver Wolf persona is turned OFF, the AI speaks as a plain, competent
+# career assistant. The TRUTHFULNESS + output-format rules are identical — only
+# the personality is removed. (Anti-fabrication and artifact-cleanliness are
+# enforced in code, not in this prompt, so they hold either way.)
+_NEUTRAL_SYSTEM_TEXT = (
+    "You are a helpful, professional career assistant for a CS student hunting "
+    "internships. Write clearly and concisely in a neutral, encouraging tone — no "
+    "persona, no slang, no roleplay. Be specific and practical. Stay strictly "
+    "truthful to the résumé and job posting: never invent or swap a skill, tool, "
+    "employer, number, or technology. Follow the requested output format exactly."
+)
+
+_NEUTRAL_TAG_TEXT = (
+    "Write every user-facing text field in a clear, professional, neutral tone "
+    "(no persona or slang) — stay strictly truthful to the resume and job, invent "
+    "nothing, and follow the output format exactly."
+)
+
+
+# --- Persona toggle -----------------------------------------------------------
+# The persona is OFF by default — the bot speaks as a neutral professional
+# assistant. Re-enable it server-wide with SILVER_WOLF_PERSONA=1 (or true/on/yes)
+# OR live via the admin /test persona command (stored in the DB, wins over env).
+# Anti-fabrication and clean artifacts do NOT depend on this flag — they're
+# enforced in code, so they hold whether the persona is on or off.
+import os as _os
+
+# Live override set by the admin command: None = defer to env; True/False = force.
+_override = None
+
+
+def set_persona_override(value):
+    """Force the persona on (True) / off (False), or clear (None → use the env
+    default). Called by the admin /test persona command; process-wide."""
+    global _override
+    _override = value
+
+
+def _env_default():
+    # Default OFF: only an explicit truthy SILVER_WOLF_PERSONA turns it on.
+    raw = (_os.getenv("SILVER_WOLF_PERSONA", "0") or "").strip().lower()
+    return raw in ("1", "true", "on", "yes")
+
+
+def persona_enabled():
+    """True if the Silver Wolf persona should be used. Live admin override wins;
+    otherwise the SILVER_WOLF_PERSONA env var (default OFF)."""
+    if _override is not None:
+        return bool(_override)
+    return _env_default()
+
+
+# --- Dynamic attribute resolution (PEP 562) ----------------------------------
+# Call sites reference `persona.SILVER_WOLF_SYSTEM` / `persona.SILVER_WOLF_TAG`
+# directly. Resolving them here (per access) means flipping the toggle switches
+# EVERY call site at once, with zero changes to the ~15 places that inject them.
+def __getattr__(name):
+    if name == "SILVER_WOLF_SYSTEM":
+        return _SILVER_WOLF_SYSTEM_TEXT if persona_enabled() else _NEUTRAL_SYSTEM_TEXT
+    if name == "SILVER_WOLF_TAG":
+        return _SILVER_WOLF_TAG_TEXT if persona_enabled() else _NEUTRAL_TAG_TEXT
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
