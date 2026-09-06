@@ -270,6 +270,35 @@ service. The FastAPI health endpoint keeps the always-on process alive.
 
 ---
 
+## Credits
+
+This project stands on public data sources and open-source projects:
+
+**Job posting data**
+- [`jobright-ai/2026-Software-Engineer-Internship`](https://github.com/jobright-ai/2026-Software-Engineer-Internship) — internship listings
+- [`jobright-ai/2026-Software-Engineer-New-Grad`](https://github.com/jobright-ai/2026-Software-Engineer-New-Grad) — new-grad listings
+- [`SimplifyJobs/Summer2026-Internships`](https://github.com/SimplifyJobs/Summer2026-Internships) — internship listings
+- [`SimplifyJobs/New-Grad-Positions`](https://github.com/SimplifyJobs/New-Grad-Positions) — new-grad listings
+- [Jobright.ai](https://jobright.ai) & [Simplify.jobs](https://simplify.jobs) — the aggregator posting pages the detail scraper enriches from
+
+**LeetCode data**
+- [`noworneverev/leetcode-api`](https://github.com/noworneverev/leetcode-api) — the public FastAPI LeetCode wrapper (`leetcode-api-pied.vercel.app`) the bot queries
+- [LeetCode](https://leetcode.com) — problem content, the daily problem, and company tags
+
+**Résumé PDF builder**
+- [`yaml-resume-builder`](https://github.com/husayni/yaml-resume-builder) — renders the résumé YAML into a LaTeX résumé template
+- [Tectonic](https://tectonic-typesetting.github.io) — compiles that LaTeX to a one-page PDF (a single ~50 MB engine, no full TeX Live)
+
+**Tech**
+- [discord.py](https://github.com/Rapptz/discord.py) · [Supabase](https://supabase.com) · [Google Gemini / Gemma](https://ai.google.dev) · [PyMuPDF](https://github.com/pymupdf/PyMuPDF) · [FastAPI](https://github.com/fastapi/fastapi)
+
+**Persona**
+- The optional **Silver Wolf** persona is a character from *Honkai: Star Rail* by [HoYoverse](https://www.hoyoverse.com). Used non-commercially as a stylistic voice; all rights to the character belong to HoYoverse.
+
+Job data is used under each source's terms for personal, non-commercial use. This project is not affiliated with or endorsed by any of the above.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
